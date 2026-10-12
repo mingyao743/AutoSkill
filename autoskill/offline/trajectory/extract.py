@@ -45,7 +45,15 @@ def extract_from_agentic_trajectory(
         units, abs_input = load_file_units(str(file_path))
         source = {"records": [_record_from_unit(u) for u in units]}
     elif source is not None:
-        source = {"records": [_record_from_unit(data_to_text_unit(source, title="inline_trajectory"))]}
+        # If the caller already passed structured trajectory records (dicts
+        # carrying messages/events/success), keep them as-is so per-record
+        # success flags and tool events survive. Only free-form payloads are
+        # wrapped into a single text record.
+        structured = _collect_records(source)
+        if structured:
+            source = {"records": structured}
+        else:
+            source = {"records": [_record_from_unit(data_to_text_unit(source, title="inline_trajectory"))]}
     if source is None:
         raise ValueError("extract_from_agentic_trajectory requires data or file_path")
 

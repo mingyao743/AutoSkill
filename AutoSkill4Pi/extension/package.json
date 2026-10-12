@@ -1,0 +1,11 @@
+{
+  "name": "autoskill-pi-extension",
+  "version": "0.1.0",
+  "private": true,
+  "description": "AutoSkill4Pi extension: experience-driven skill self-evolution for the Pi Coding Agent.",
+  "type": "module",
+  "main": "autoskill-pi.ts",
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  }
+}
