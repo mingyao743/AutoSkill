@@ -13,13 +13,12 @@
  *   - 不在 factory 里起 socket;bridge 从 session_start 启动;
  *   - session_shutdown 幂等关闭 server 与子进程。
  *
- * ⚠️ 需要在你第一次接入真实 Pi 时核对的唯一一点:
- *   callPiModel() 里对 ctx.modelRegistry.streamSimple(...) 的入参/返回签名。
- *   其余逻辑(session_start/agent_settled/session_shutdown 事件、registerCommand、
- *   registerTool、spawn python)均按官方 extensions.md 契约实现。
- *   若 streamSimple 形态不同,只需改 callPiModel() 一个函数。
- *   备选:不启用 bridge,直接设置 AUTOSKILL_PI_LLM_BASE_URL 为任意 OpenAI 兼容端点
- *   (config-resolve 回退),同样无需改动其它代码。
+ * 关于模型复用 API(已按本地安装的 @earendil-works/pi-ai / pi-coding-agent 类型核对):
+ *   Pi 的 ModelRegistry 暴露 streamSimple(model, context, options?) -> AssistantMessageEventStream,
+ *   并自带 request-time 鉴权;getApiKeyAndHeaders(model) -> Promise<ResolvedRequestAuth> 用于显式
+ *   解析 key/header。callPiModel() 即据此实现,复用 ctx.model + ctx.modelRegistry,无需 import pi-ai。
+ *   备选:不启用 bridge,直接设置 AUTOSKILL_PI_LLM_BASE_URL 为任意 OpenAI 兼容端点,
+ *   此时 extension 尊重用户配置、不再注入内置 bridge(见 applyLlmBridgeEnv)。
  */
 
 import http from "node:http";
@@ -37,16 +36,33 @@ let bridgePort = 0;
 let liveExtractCounter = 0;
 const LIVE_EVERY_TURNS = Number(process.env["AUTOSKILL_PI_LIVE_EXTRACT_EVERY_TURNS"] || "0"); // 0=off
 
+// ---- LLM 路由策略:默认走内置 bridge(复用 Pi 当前模型),用户自配外部端点时尊重其配置 ----
+function userConfiguredExternalLlm(): boolean {
+  // 只要用户在环境里显式配了 AUTOSKILL_PI_LLM_BASE_URL,就视为“自配外部 OpenAI 兼容端点”。
+  // bridge 的 URL 是每个进程随机端口、不会出现在父进程 env 里,因此不会误判。
+  return Boolean((process.env["AUTOSKILL_PI_LLM_BASE_URL"] || "").trim());
+}
+
+function applyLlmBridgeEnv(env: NodeJS.ProcessEnv): void {
+  if (userConfiguredExternalLlm()) {
+    // 用户已自配外部端点:尊重其 AUTOSKILL_PI_LLM_PROVIDER/BASE_URL/API_KEY/MODEL
+    // (这些已由 ...process.env 继承进来),不覆盖、不注入 bridge。
+    return;
+  }
+  // 默认:把 AutoSkill 抽取 LLM 路由到内置 bridge,复用 Pi 当前模型 + key,无需单独配凭据。
+  env["AUTOSKILL_PI_LLM_PROVIDER"] = "generic";
+  env["AUTOSKILL_PI_LLM_BASE_URL"] = `http://${BRIDGE_HOST}:${bridgePort}/v1`;
+  if (!env["AUTOSKILL_PI_LLM_MODEL"]) env["AUTOSKILL_PI_LLM_MODEL"] = "pi-current-model";
+}
+
 // ---- 触发一次后台处理:让 Python 扫 sessions 目录,账本幂等去重 ----
 function runPiRuntime(ctx: ExtensionContext, cmd: string[], extraEnv: Record<string, string>) {
   const env: NodeJS.ProcessEnv = {
     ...process.env,
-    AUTOSKILL_PI_LLM_PROVIDER: "generic",
-    AUTOSKILL_PI_LLM_BASE_URL: `http://${BRIDGE_HOST}:${bridgePort}/v1`,
-    AUTOSKILL_PI_LLM_MODEL: "pi-current-model",
     AUTOSKILL_PI_SESSIONS_DIR: PI_SESSIONS_ROOT,
-    ...extraEnv,
   };
+  applyLlmBridgeEnv(env);
+  Object.assign(env, extraEnv);
   if (!REPO_DIR) {
     ctx.ui.notify("AutoSkill: AUTOSKILL_PI_REPO_DIR 未设置,跳过本次抽取", "warn");
     return;
@@ -77,33 +93,60 @@ function runPiRuntime(ctx: ExtensionContext, cmd: string[], extraEnv: Record<str
 
 // ---- Pi 模型 bridge:OpenAI 兼容 /v1/chat/completions -> Pi 当前模型 ----
 async function callPiModel(ctx: ExtensionContext, body: any): Promise<string> {
-  // ⚠️ 唯一需按真实 Pi API 对齐的调用点。以下为基于 extensions.md 的实现。
-  // streamSimple 用于 provider 无关的嵌套模型调用;这里把 OpenAI messages 转成
-  // Pi 可接受的输入并收集完整文本返回。
-  const messages = Array.isArray(body?.messages) ? body.messages : [];
-  const promptText = messages
-    .map((m: any) => `${m.role}: ${typeof m.content === "string" ? m.content : (m.content || []).map((p: any) => p.text || "").join("")}`)
-    .join("\n");
-
+  // 复用 Pi 当前选定的模型 + provider 做抽取。
+  // 真实 Pi API: ctx.modelRegistry.streamSimple(model, context, options?) -> AssistantMessageEventStream
+  //   - model   : ctx.model(当前会话选中的模型,可能为 undefined)
+  //   - context : { systemPrompt?, messages: Message[], tools? }(pi-ai Context)
+  //   - options : { signal?, apiKey?, headers? }(streamSimple 内部自带 request-time 鉴权)
+  //   - 返回事件流;text_delta 事件带 `delta: string`。
+  const model: any = (ctx as any).model;
+  if (!model) {
+    throw new Error("AutoSkill: Pi 尚未选定模型(ctx.model 为空),无法复用 Pi 模型做抽取。");
+  }
   const registry: any = (ctx as any).modelRegistry;
   if (!registry || typeof registry.streamSimple !== "function") {
-    throw new Error("ctx.modelRegistry.streamSimple 不可用:请核对当前 Pi 版本的模型调用 API");
+    throw new Error("AutoSkill: ctx.modelRegistry.streamSimple 不可用(请核对当前 Pi 版本)。");
   }
 
-  // 兼容两种可能签名:(1) 事件流 (2) 直接返回聚合结果
+  // 把 OpenAI chat/completions body 转成 pi-ai Context(system 抽为 systemPrompt,其余按 user/assistant)。
+  const messages = Array.isArray(body?.messages) ? body.messages : [];
+  const toText = (c: any): string =>
+    typeof c === "string" ? c : Array.isArray(c) ? c.map((p: any) => p?.text ?? "").join("") : "";
+  const systemMsg = messages.find((m: any) => m?.role === "system");
+  const piMessages = messages
+    .filter((m: any) => m?.role !== "system")
+    .map((m: any) => ({
+      role: m?.role === "assistant" ? "assistant" : "user",
+      content: toText(m?.content),
+    }));
+  const context: any = {
+    systemPrompt:
+      (systemMsg ? toText(systemMsg.content) : "") ||
+      "你是经验挖掘引擎(LLM 模式)。根据参考资料输出结果。",
+    messages: piMessages,
+  };
+
+  // streamSimple 内部会做 request-time 鉴权;这里显式解析一次,缺凭据时给出明确错误,
+  // 并把解析出的 apiKey/header 透传下去(如 OAuth header)。getApiKeyAndHeaders 返回 Promise。
+  const options: any = { signal: (ctx as any).signal };
+  if (typeof registry.getApiKeyAndHeaders === "function") {
+    const auth: any = await registry.getApiKeyAndHeaders(model);
+    if (auth && auth.ok === false) {
+      throw new Error(`AutoSkill: Pi 模型鉴权失败: ${auth.error}`);
+    }
+    if (auth?.apiKey) options.apiKey = auth.apiKey;
+    if (auth?.headers) options.headers = auth.headers;
+  }
+
+  // 消费事件流:累加 text_delta.delta 作为完整文本。
+  const stream = registry.streamSimple(model, context, options) as AsyncIterable<any>;
   let collected = "";
-  const result = await registry.streamSimple({
-    prompt: promptText,
-    system: (messages.find((m: any) => m.role === "system") || {}).content,
-    signal: ctx.signal,
-    onEvent: (ev: any) => {
-      if (ev && typeof ev.text === "string") collected += ev.text;
-    },
-  });
-  if (typeof result === "string") collected = result;
-  else if (result?.text) collected = String(result.text);
-  else if (result?.content) collected = typeof result.content === "string" ? result.content : JSON.stringify(result.content);
-  return collected;
+  for await (const ev of stream) {
+    if (ev?.type === "text_delta" && typeof ev.delta === "string") collected += ev.delta;
+  }
+  const out = collected.trim();
+  if (!out) throw new Error("AutoSkill: Pi 模型返回空补全。");
+  return out;
 }
 
 function startBridge(ctx: ExtensionContext) {
@@ -156,7 +199,8 @@ function stopBridge() {
 
 export default function (pi: ExtensionAPI) {
   pi.on("session_start", async (_event, ctx) => {
-    startBridge(ctx);
+    // 仅当用户没有自配外部 LLM 端点时才起 bridge(避免多余监听)。
+    if (!userConfiguredExternalLlm()) startBridge(ctx);
   });
 
   pi.on("session_shutdown", async () => {
@@ -219,10 +263,9 @@ function runPythonCapture(ctx: ExtensionContext, cmd: string[]): Promise<string>
     if (!REPO_DIR) return reject(new Error("AUTOSKILL_PI_REPO_DIR 未设置"));
     const env: NodeJS.ProcessEnv = {
       ...process.env,
-      AUTOSKILL_PI_LLM_PROVIDER: "generic",
-      AUTOSKILL_PI_LLM_BASE_URL: `http://${BRIDGE_HOST}:${bridgePort}/v1`,
       AUTOSKILL_PI_SESSIONS_DIR: PI_SESSIONS_ROOT,
     };
+    applyLlmBridgeEnv(env);
     const child = spawn(PYTHON, ["-m", "AutoSkill4Pi.runtime.pi_runtime", ...cmd], { cwd: REPO_DIR, env });
     let out = "";
     child.stdout.on("data", (b) => (out += b.toString()));

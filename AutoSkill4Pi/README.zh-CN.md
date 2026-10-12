@@ -77,15 +77,20 @@ find ~/.pi/agent/skills -name SKILL.md | head
 ## 复用 Pi 当前模型（bridge）
 
 extension 在 `session_start` 时在本进程起一个仅监听 `127.0.0.1` 的 OpenAI 兼容
-`POST /v1/chat/completions` 服务，内部转调 Pi 的模型运行时（`ctx.modelRegistry.streamSimple`）。
+`POST /v1/chat/completions` 服务，内部转调 Pi 的模型运行时
+（`ctx.modelRegistry.streamSimple(model, context, options)` → `AssistantMessageEventStream`，累加 `text_delta.delta`）。
 Python 侧以 `provider=generic` 指向该 bridge，从而**复用 Pi 正在用的模型与鉴权**，无需为抽取另配 provider/key。
 
-⚠️ **接入真实 Pi 后需核对的唯一一点**：`extension/autoskill-pi.ts` 里 `callPiModel()`
-对 `ctx.modelRegistry.streamSimple(...)` 的入参/返回签名。若你的 Pi 版本形态不同，只需改这一个函数。
-其余逻辑（`session_start`/`agent_settled`/`session_shutdown` 事件、`registerCommand`、`registerTool`、spawn python）均按官方 `docs/extensions.md` 契约实现。
+> 该调用签名已按本地安装的 `@earendil-works/pi-ai` / `@earendil-works/pi-coding-agent` 类型核对：
+> `streamSimple` 自带 request-time 鉴权，`getApiKeyAndHeaders(model)` 返回 `Promise<ResolvedRequestAuth>` 用于显式解析 key/header；
+> `Context` 为 `{ systemPrompt?, messages, tools? }`。无需 import `pi-ai`（复用 Pi 传入的 `ctx.modelRegistry`）。
+
+**env 注入策略**：extension 默认（用户未自配时）向 Python 注入 `AUTOSKILL_PI_LLM_PROVIDER=generic` 与指向 bridge 的
+`AUTOSKILL_PI_LLM_BASE_URL`；一旦检测到用户已在环境中设置 `AUTOSKILL_PI_LLM_BASE_URL`，则**尊重用户配置**、不注入 bridge（连 bridge 也不启动），
+`AUTOSKILL_PI_LLM_PROVIDER` / `API_KEY` / `MODEL` 一并沿用用户值。
 
 备选（不想用 bridge）：直接设 `AUTOSKILL_PI_LLM_BASE_URL=<任意 OpenAI 兼容端点>` 与
-`AUTOSKILL_PI_LLM_MODEL` / `AUTOSKILL_PI_LLM_API_KEY`，config-resolve 回退即可，无需改代码。
+`AUTOSKILL_PI_LLM_MODEL` / `AUTOSKILL_PI_LLM_API_KEY` 即可，extension 会自动让位、config-resolve 回退，无需改代码。
 embeddings 默认走本地 `hashing`（不联网、无需 key）；如需更强检索可设 `AUTOSKILL_PI_EMBEDDINGS_PROVIDER`。
 
 ## 配置项（环境变量）
@@ -100,8 +105,8 @@ embeddings 默认走本地 `hashing`（不联网、无需 key）；如需更强�
 | `AUTOSKILL_PI_LEDGER` | `~/.pi/autoskill/processed_ledger.jsonl` | 幂等去重账本 |
 | `AUTOSKILL_PI_SESSIONS_DIR` | `~/.pi/agent/sessions` | Pi 会话根目录 |
 | `AUTOSKILL_PI_LLM_PROVIDER` | `generic` | `generic`(bridge) / `mock` / `dashscope` 等 |
-| `AUTOSKILL_PI_LLM_BASE_URL` | bridge 注入 | generic 端点（config-resolve 时手填） |
-| `AUTOSKILL_PI_LLM_MODEL` / `_API_KEY` | bridge 注入 | 同上 |
+| `AUTOSKILL_PI_LLM_BASE_URL` | 用户未设时注入 bridge | generic 端点；用户自配则尊重、不再注入 bridge |
+| `AUTOSKILL_PI_LLM_MODEL` / `_API_KEY` | bridge 注入（未自配时） | 同上；用户自配时沿用用户值 |
 | `AUTOSKILL_PI_EMBEDDINGS_PROVIDER` | `hashing` | `hashing`/`none`/`openai`/`generic`/`dashscope`/`glm` |
 | `AUTOSKILL_PI_LIVE_EXTRACT_EVERY_TURNS` | `0`(关) | >0 时活跃会话每 N turn 做一次 checkpoint 抽取 |
 | `AUTOSKILL_PI_BM25_WEIGHT` | `0.7` | 检索里 BM25 权重（离线场景偏 BM25） |
@@ -154,6 +159,6 @@ AutoSkill4Pi/
 
 ## 待你在真实 Pi 上完成的收尾
 
-1. 核对并按需微调 `callPiModel()` 的 `streamSimple` 调用签名（复用 Pi 模型）；
+1. 首次 `agent_settled` 触发抽取时，确认 bridge 能复用 Pi 模型返回非空文本（`callPiModel()` 签名已按本地 pi-ai 类型核对）；
 2. 首次 `agent_settled` 后确认 `~/.pi/agent/skills/` 出现带 `.autoskill-managed.json` 的技能目录；
 3. Pi 里用 `/skill:<name>` 验证命中与加载；观察 `/autoskill_extract_now` 的输出与账本去重。
