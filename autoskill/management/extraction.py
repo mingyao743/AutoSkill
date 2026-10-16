@@ -82,6 +82,7 @@ class SkillExtractor(Protocol):
         max_candidates: int,
         hint: Optional[str] = None,
         retrieved_reference: Optional[Dict[str, Any]] = None,
+        feedback_signal: Optional[Dict[str, Any]] = None,
     ) -> List[SkillCandidate]:
         """Run extract."""
         ...
@@ -110,6 +111,7 @@ class HeuristicSkillExtractor:
         max_candidates: int,
         hint: Optional[str] = None,
         retrieved_reference: Optional[Dict[str, Any]] = None,
+        feedback_signal: Optional[Dict[str, Any]] = None,
     ) -> List[SkillCandidate]:
         """Run extract."""
         text = _flatten_sources(messages=messages, events=events)
@@ -158,6 +160,7 @@ class LLMSkillExtractor:
         max_candidates: int,
         hint: Optional[str] = None,
         retrieved_reference: Optional[Dict[str, Any]] = None,
+        feedback_signal: Optional[Dict[str, Any]] = None,
     ) -> List[SkillCandidate]:
         """Run extract."""
         payload = {
@@ -172,6 +175,9 @@ class LLMSkillExtractor:
             "hint": (str(hint).strip() if hint and str(hint).strip() else None),
             "retrieved_reference": (
                 dict(retrieved_reference) if isinstance(retrieved_reference, dict) else None
+            ),
+            "feedback_signal": (
+                dict(feedback_signal) if isinstance(feedback_signal, dict) else None
             ),
         }
         if self._config.redact_sources_before_llm:
@@ -198,6 +204,7 @@ class LLMSkillExtractor:
             "- Drop details with unclear user origin.\n"
             "- Reject assistant-invented specifics (checklists, thresholds, role maps, policy labels/taxonomies, detailed expansions) unless user explicitly requested/approved them; keep user-stated hard limits and mandatory steps as valid constraints.\n"
             "- If evidence is ambiguous or mostly assistant-authored, output {\"skills\": []}.\n"
+            "- FEEDBACK SIGNAL: If DATA.feedback_signal is present and signal is 'feedback' (especially with confidence >= 0.6), treat user corrections/revisions as HIGH-PRIORITY extraction evidence. Feedback signals indicate the user is actively refining generation policy, which is strong extraction signal.\n"
             "\n"
             "### 2) RECENCY, TOPIC COHERENCE, AND RETRIEVED REFERENCE (CRITICAL)\n"
             "- Prioritize recent user rounds; use older context mainly to judge continuity vs topic switch.\n"
@@ -227,6 +234,7 @@ class LLMSkillExtractor:
             "  - revision feedback that changes generation policy (detail, specificity, completeness, evidence density, terminology level, tone, audience fit, structure strictness);\n"
             "  - explicit multi-step AI operation sequence (workflow/SOP);\n"
             "  - explicit schema/template requirements.\n"
+            "- FEEDBACK SIGNAL BOOST: If DATA.feedback_signal.signal is 'feedback' with confidence >= 0.7, lower the extraction threshold — user corrections are strong reusable-policy evidence. If feedback types include 'correction' or 'revision', prioritize those constraints as the skill's core rules.\n"
             "- Future reuse test (user-specific): after de-identification, ask whether this user is likely to need the same policy/workflow again in nearby future interactions; if unlikely, return {\"skills\": []}.\n"
             "- Decision boundary: content-only change (WHAT for this instance) usually does not extract; policy/process change (HOW across similar tasks) does extract.\n"
             "- Do not under-trigger on common task types: writing/rewrite/coding can still yield reusable skills when durable policy constraints are present.\n"
@@ -378,6 +386,7 @@ class LLMSkillExtractor:
             "Apply the same constraints:\n"
             "- [A] Role and evidence scope\n"
             "- If DATA includes primary_user_questions and full_conversation, prioritize primary_user_questions (USER inputs) as evidence; use full_conversation only as context reference, and do not treat assistant/model replies as evidence.\n"
+            "- If DATA.feedback_signal.signal is 'feedback' (especially confidence >= 0.6), treat user corrections/revisions as high-priority extraction evidence.\n"
             "- Skills are SKILL.md onboarding guides: keep only reusable, non-obvious procedure/preferences.\n"
             "- DATA.retrieved_reference is auxiliary identity context (update-vs-new), not extraction evidence.\n"
             "- DATA.retrieved_reference.triggers (if present) are intent hints for identity matching only; not new evidence.\n"

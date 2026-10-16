@@ -110,6 +110,13 @@ def extract_from_agentic_trajectory(
             if source_file:
                 md["source_file"] = source_file
 
+            # Pass feedback signal if present
+            feedback = record.get("feedback_signal")
+            if feedback and isinstance(feedback, dict):
+                md["feedback_signal"] = feedback.get("signal", "unknown")
+                md["feedback_types"] = feedback.get("types", [])
+                md["feedback_confidence"] = float(feedback.get("confidence", 0.0))
+
             try:
                 updated = sdk.ingest(
                     user_id=str(user_id or "").strip() or "u1",

@@ -108,6 +108,9 @@ class AutoSkill:
         raw_ref = md.get("extraction_reference")
         retrieved_reference = dict(raw_ref) if isinstance(raw_ref, dict) else None
 
+        raw_fb = md.get("feedback_signal")
+        feedback_signal = dict(raw_fb) if isinstance(raw_fb, dict) else None
+
         # 1) Extract candidates (LLM or heuristic)
         # Extract at most one Skill per ingest to keep quality high and avoid noisy skill spam.
         max_candidates = max(0, min(1, int(self.config.max_candidates_per_ingest)))
@@ -118,6 +121,7 @@ class AutoSkill:
             max_candidates=max_candidates,
             hint=hint,
             retrieved_reference=retrieved_reference,
+            feedback_signal=feedback_signal,
         )
         # 2) Maintain (dedupe/merge/version) and persist to store
         updated = self.maintainer.apply(extracted, user_id=user_id, metadata=metadata)
@@ -143,6 +147,7 @@ class AutoSkill:
         hint: Optional[str] = None,
         max_candidates: Optional[int] = None,
         retrieved_reference: Optional[Dict[str, Any]] = None,
+        feedback_signal: Optional[Dict[str, Any]] = None,
     ) -> List[Any]:
         """
         Extracts candidate skills without persisting (for simulation/debug APIs).
@@ -164,6 +169,9 @@ class AutoSkill:
             retrieved_reference=(
                 dict(retrieved_reference) if isinstance(retrieved_reference, dict) else None
             ),
+            feedback_signal=(
+                dict(feedback_signal) if isinstance(feedback_signal, dict) else None
+            ),
         )
 
     def _extract_candidates(
@@ -175,35 +183,32 @@ class AutoSkill:
         max_candidates: int,
         hint: Optional[str],
         retrieved_reference: Optional[Dict[str, Any]],
+        feedback_signal: Optional[Dict[str, Any]] = None,
     ) -> List[Any]:
         """
         Calls extractor with backward compatibility for custom extractors that do not yet
-        accept `retrieved_reference`.
+        accept `retrieved_reference` or `feedback_signal`.
         """
 
         fn = self.extractor.extract
-        supports_reference = False
+        params = set()
         try:
-            supports_reference = "retrieved_reference" in inspect.signature(fn).parameters
+            params = set(inspect.signature(fn).parameters.keys())
         except Exception:
-            supports_reference = False
+            pass
 
-        if supports_reference:
-            return fn(
-                user_id=user_id,
-                messages=messages,
-                events=events,
-                max_candidates=max_candidates,
-                hint=hint,
-                retrieved_reference=retrieved_reference,
-            )
-        return fn(
+        kwargs: Dict[str, Any] = dict(
             user_id=user_id,
             messages=messages,
             events=events,
             max_candidates=max_candidates,
             hint=hint,
         )
+        if "retrieved_reference" in params:
+            kwargs["retrieved_reference"] = retrieved_reference
+        if "feedback_signal" in params and feedback_signal is not None:
+            kwargs["feedback_signal"] = feedback_signal
+        return fn(**kwargs)
 
     def add(
         self,
