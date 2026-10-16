@@ -16,14 +16,15 @@ AutoSkill4Pi 是 [AutoSkill](../README.zh-CN.md)（经验驱动终身学习 ELL�
 Pi 进程
   └─ extension: autoskill-pi.ts
        ├─ session_start      → 启动本地模型 bridge（OpenAI 兼容 /v1/chat/completions）
-       ├─ agent_settled      → 后台拉起 Python runtime：扫描 Pi 会话目录做抽取/维护
-       ├─ /autoskill_extract_now、/autoskill_sync 命令
+       ├─ agent_settled      → 后台拉起 Python runtime：扫描 Pi 会话目录做抽取/维护 + 进化检查
+       ├─ /autoskill_extract_now、/autoskill_sync、/autoskill_evolve 命令
        └─ autoskill_search 工具（模型可主动检索技能库，只读）
                                   │
                                   ▼
         AutoSkill4Pi/runtime (Python, provider=generic → bridge)
           ├─ pi_session_adapter  Pi JSONL → 轨迹记录（活跃分支/工具事件/成败）
           ├─ 离线轨迹抽取        add/merge/discard + 版本演进 → SkillBank 真源
+          ├─ 进化检查            provenance 累积 → 触发 darwin-skill 进化循环
           └─ pi_skill_mirror     SkillBank → ~/.pi/agent/skills（带托管标记）
 ```
 

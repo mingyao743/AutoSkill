@@ -86,7 +86,6 @@ class OpenClawServiceRuntimeTest(unittest.TestCase):
                 user_id="u-test",
                 extract_enabled=True,
                 ingest_window=6,
-                top_k=1,
             ).normalize(),
             main_turn_proxy_config=OpenClawMainTurnProxyConfig(
                 enabled=main_turn_enabled,

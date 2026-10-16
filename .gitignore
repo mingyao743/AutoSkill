@@ -9,6 +9,7 @@ dist/
 .venv/
 .autoskill/
 .DS_Store
+.pi_smoke/
 Skills/Users/
 Skills/vectors/
 # Runtime BM25 index artifacts (legacy + current roots)

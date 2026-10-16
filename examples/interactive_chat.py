@@ -18,8 +18,6 @@ from autoskill.interactive import (
     ConsoleIO,
     InteractiveChatApp,
     InteractiveConfig,
-    LLMQueryRewriter,
-    LLMSkillSelector,
 )
 from autoskill.llm.factory import build_llm
 
@@ -288,46 +286,11 @@ def main() -> None:
     )
     parser.add_argument("--user-id", default=_env("AUTOSKILL_USER_ID", "u1"))
     parser.add_argument(
-        "--skill-scope",
-        default=_env("AUTOSKILL_SKILL_SCOPE", "all"),
-        help="Which skills to retrieve/use: user|common|all (common==shared library).",
-    )
-    parser.add_argument(
-        "--rewrite-mode",
-        default=_env("AUTOSKILL_REWRITE_MODE", "always"),
-        help="Rewrite query before retrieval: auto|always|never.",
-    )
-    parser.add_argument(
-        "--rewrite-history-turns",
-        type=int,
-        default=int(_env("AUTOSKILL_REWRITE_HISTORY_TURNS", "6")),
-        help="How many recent turns to include in query rewriting.",
-    )
-    parser.add_argument(
-        "--rewrite-history-chars",
-        type=int,
-        default=int(_env("AUTOSKILL_REWRITE_HISTORY_CHARS", "4090")),
-        help="Max history units for query rewriting (CJK chars + English words).",
-    )
-    parser.add_argument(
-        "--rewrite-max-query-chars",
-        type=int,
-        default=int(_env("AUTOSKILL_REWRITE_MAX_QUERY_CHARS", "256")),
-        help="Max query units for rewritten query (CJK chars + English words).",
-    )
-    parser.add_argument(
-        "--min-score",
-        type=float,
-        default=float(_env("AUTOSKILL_MIN_SCORE", "0.4")),
-        help="Minimum similarity score for retrieved skills (post-search filter).",
-    )
-    parser.add_argument(
         "--library-dir",
         action="append",
         default=[],
         help="Additional read-only library root (can be passed multiple times).",
     )
-    parser.add_argument("--top-k", type=int, default=int(_env("AUTOSKILL_TOP_K", "1")))
     parser.add_argument("--history-turns", type=int, default=int(_env("AUTOSKILL_HISTORY_TURNS", "100")))
     parser.add_argument("--ingest-window", type=int, default=int(_env("AUTOSKILL_INGEST_WINDOW", "6")))
     parser.add_argument(
@@ -352,13 +315,6 @@ def main() -> None:
     interactive_cfg = InteractiveConfig(
         store_dir=str(args.store_dir),
         user_id=str(args.user_id),
-        skill_scope=str(args.skill_scope),
-        rewrite_mode=str(args.rewrite_mode),
-        rewrite_history_turns=int(args.rewrite_history_turns),
-        rewrite_history_chars=int(args.rewrite_history_chars),
-        rewrite_max_query_chars=int(args.rewrite_max_query_chars),
-        min_score=float(args.min_score),
-        top_k=int(args.top_k),
         history_turns=int(args.history_turns),
         ingest_window=int(args.ingest_window),
         extract_turn_limit=int(args.extract_turn_limit),
@@ -393,40 +349,11 @@ def main() -> None:
     )
     chat_llm = None if llm_provider == "mock" else build_llm(llm_cfg)
 
-    query_rewriter = None
-    if llm_provider != "mock":
-        rewrite_cfg = dict(llm_cfg)
-        if str(rewrite_cfg.get("provider") or "").lower() in {"glm", "bigmodel", "zhipu"}:
-            try:
-                rewrite_cfg["max_tokens"] = min(int(rewrite_cfg.get("max_tokens", 30000)), 30000)
-            except Exception:
-                rewrite_cfg["max_tokens"] = 30000
-        query_rewriter = LLMQueryRewriter(
-            build_llm(rewrite_cfg),
-            max_history_turns=int(interactive_cfg.rewrite_history_turns),
-            max_history_chars=int(interactive_cfg.rewrite_history_chars),
-            max_query_chars=int(interactive_cfg.rewrite_max_query_chars),
-        )
-
-    skill_selector = None
-    # if llm_provider != "mock":
-    #     select_cfg = dict(llm_cfg)
-    #     if str(select_cfg.get("provider") or "").lower() in {"glm", "bigmodel", "zhipu"}:
-    #         try:
-    #             select_cfg["max_tokens"] = min(int(select_cfg.get("max_tokens", 4096)), 4096)
-    #         except Exception:
-    #             select_cfg["max_tokens"] = 4096
-    #     skill_selector = LLMSkillSelector(build_llm(select_cfg))
-
-    # print("skill_selector", skill_selector)
-    # print("query_rewriter", query_rewriter)
     runtime = AutoSkillRuntime(
         sdk=sdk,
         llm_config=llm_cfg,
         embeddings_config=emb_cfg,
         interactive_config=interactive_cfg,
-        query_rewriter=query_rewriter,
-        skill_selector=skill_selector,
     )
 
     app = InteractiveChatApp(
@@ -434,8 +361,6 @@ def main() -> None:
         config=runtime.interactive_config,
         io=ConsoleIO(),
         chat_llm=chat_llm,
-        query_rewriter=runtime.query_rewriter,
-        skill_selector=runtime.skill_selector,
     )
     app.run()
 

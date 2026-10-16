@@ -3,9 +3,9 @@ Headless interactive session.
 
 This module implements the same core orchestration as `InteractiveChatApp`, but without console IO.
 It is intended for programmatic frontends (e.g., a web UI) that want:
-- chat + retrieval each turn
-- optional query rewriting, skill selection, and extraction gating
-- structured outputs for rendering (retrieval hits, extracted skills, etc.)
+- chat each turn
+- optional extraction gating
+- structured outputs for rendering (extracted skills, etc.)
 """
 
 from __future__ import annotations
@@ -20,13 +20,8 @@ from typing import Any, Dict, Iterator, List, Optional, Tuple
 from ..client import AutoSkill
 from ..llm.base import LLM
 from ..models import Skill, SkillHit
-from ..render import render_skills_context, select_skills_for_context
-from ..utils.skill_resources import extract_skill_resource_paths
 from .commands import Command, parse_command
 from .config import InteractiveConfig
-from .retrieval import retrieve_hits_by_scope
-from .rewriting import LLMQueryRewriter
-from .selection import LLMSkillSelector
 from .usage_tracking import LLMSkillUsageJudge, build_query_key
 
 
@@ -45,7 +40,6 @@ class _BgExtractJob:
     trigger: str
     hint: Optional[str]
     epoch: int
-    retrieval_reference: Optional[Dict[str, Any]] = None
 
 
 @dataclass
@@ -57,58 +51,6 @@ class _BgUsageJob:
     hits: List[SkillHit]
     selected_for_context: List[Skill]
     epoch: int
-
-
-def _skill_source_label(skill: Skill) -> str:
-    """Returns a compact source label used by retrieval diagnostics."""
-
-    owner = str(getattr(skill, "user_id", "") or "").strip()
-    if owner.startswith("library:"):
-        return owner
-    if owner:
-        return f"user:{owner}"
-    return "user"
-
-
-def _format_hit(hit: SkillHit, *, rank: int) -> Dict[str, Any]:
-    """Normalizes a `SkillHit` into a stable JSON-ready dict."""
-
-    skill = getattr(hit, "skill", None)
-    score = float(getattr(hit, "score", 0.0) or 0.0)
-    if skill is None:
-        return {"rank": int(rank), "score": score}
-    return {
-        "rank": int(rank),
-        "score": score,
-        "id": str(skill.id),
-        "name": str(skill.name),
-        "description": str(skill.description),
-        "resource_paths": extract_skill_resource_paths(skill, max_items=12),
-        "source": _skill_source_label(skill),
-        "owner": str(getattr(skill, "user_id", "") or ""),
-        "version": str(getattr(skill, "version", "") or ""),
-    }
-
-
-def _top_reference_from_hits(hits: List[SkillHit], *, user_id: str) -> Optional[Dict[str, Any]]:
-    """Run top reference from hits."""
-    if not hits:
-        return None
-    top = hits[0]
-    skill = getattr(top, "skill", None)
-    if skill is None:
-        return None
-    owner = str(getattr(skill, "user_id", "") or "").strip()
-    scope = "library" if owner.startswith("library:") else ("user" if owner == str(user_id or "").strip() else "other")
-    return {
-        "id": str(getattr(skill, "id", "") or "").strip(),
-        "name": str(getattr(skill, "name", "") or "").strip(),
-        "description": str(getattr(skill, "description", "") or "").strip(),
-        "triggers": [str(t).strip() for t in (getattr(skill, "triggers", []) or []) if str(t).strip()][:20],
-        "resource_paths": extract_skill_resource_paths(skill, max_items=16),
-        "scope": scope,
-        "score": float(getattr(top, "score", 0.0) or 0.0),
-    }
 
 
 def _truncate_text(text: str, *, max_chars: int) -> str:
@@ -127,7 +69,7 @@ def _now_ms() -> int:
 
 class InteractiveSession:
     """
-    Stateful session for interactive chat with retrieval and optional extraction.
+    Stateful session for interactive chat with optional extraction.
 
     The session stores:
     - conversation messages (for chat history)
@@ -140,15 +82,11 @@ class InteractiveSession:
         sdk: AutoSkill,
         config: Optional[InteractiveConfig] = None,
         chat_llm: Optional[LLM] = None,
-        query_rewriter: Optional[LLMQueryRewriter] = None,
-        skill_selector: Optional[LLMSkillSelector] = None,
     ) -> None:
         """Run init."""
         self.sdk = sdk
         self.config = (config or InteractiveConfig()).normalize()
         self.chat_llm = chat_llm
-        self.query_rewriter = query_rewriter
-        self.skill_selector = skill_selector
         self.skill_usage_judge = (
             LLMSkillUsageJudge(chat_llm)
             if (chat_llm is not None and bool(getattr(self.config, "usage_tracking_enabled", True)))
@@ -354,19 +292,10 @@ class InteractiveSession:
             }
 
         if name == "/rewrite":
-            mode = (arg or "").strip().lower()
-            if mode in {"auto", "always", "never"}:
-                self.config.rewrite_mode = mode
-                return {
-                    "kind": "command",
-                    "command": name,
-                    "chat_append": [{"role": "system", "content": f"Rewrite mode: {self.config.rewrite_mode}"}],
-                    "config": asdict(self.config),
-                }
             return {
                 "kind": "command",
                 "command": name,
-                "chat_append": [{"role": "system", "content": "Usage: /rewrite auto|always|never"}],
+                "chat_append": [{"role": "system", "content": "Rewrite mode is no longer configurable."}],
                 "config": asdict(self.config),
             }
 
@@ -408,22 +337,10 @@ class InteractiveSession:
             }
 
         if name == "/scope":
-            scope = (arg or "").strip().lower()
-            if scope == "common":
-                scope = "library"
-            if scope in {"all", "user", "library"}:
-                self.config.skill_scope = scope
-                self._schedule_vector_prewarm()
-                return {
-                    "kind": "command",
-                    "command": name,
-                    "chat_append": [{"role": "system", "content": f"Skill scope: {self.config.skill_scope}"}],
-                    "config": asdict(self.config),
-                }
             return {
                 "kind": "command",
                 "command": name,
-                "chat_append": [{"role": "system", "content": "Usage: /scope user|common|all"}],
+                "chat_append": [{"role": "system", "content": "Skill scope is no longer configurable."}],
                 "config": asdict(self.config),
             }
 
@@ -450,35 +367,10 @@ class InteractiveSession:
                     "chat_append": [{"role": "system", "content": "Usage: /search <query>"}],
                     "config": asdict(self.config),
                 }
-            retrieved = retrieve_hits_by_scope(
-                sdk=self.sdk,
-                query=q,
-                user_id=self.config.user_id,
-                scope=self.config.skill_scope,
-                top_k=self.config.top_k,
-                min_score=float(getattr(self.config, "min_score", 0.0) or 0.0),
-                allow_partial_vectors=False,
-            )
-            hits = list(retrieved.get("hits") or [])
-            hits_user = list(retrieved.get("hits_user") or [])
-            hits_library = list(retrieved.get("hits_library") or [])
-            retrieval = self._build_retrieval_info(
-                original_query=q,
-                rewritten_query=None,
-                search_query=q,
-                hits=hits,
-                hits_user=hits_user,
-                hits_library=hits_library,
-                selected_for_use=[h.skill for h in hits],
-                selected_for_context=[h.skill for h in hits],
-                context_injected=False,
-                error=(str(retrieved.get("error") or "") or None),
-            )
             return {
                 "kind": "command",
                 "command": name,
                 "chat_append": [{"role": "system", "content": f"Search: {q}"}],
-                "retrieval": retrieval,
                 "config": asdict(self.config),
             }
 
@@ -560,10 +452,9 @@ class InteractiveSession:
 
         Stages:
         1) drain background extraction result
-        2) rewrite query + retrieve/select skills
-        3) (auto mode) schedule extraction using retrieval query/top1 reference
-        4) generate assistant response
-        5) stage latest window for the next-turn extraction
+        2) (auto mode) schedule extraction
+        3) generate assistant response
+        4) stage latest window for the next-turn extraction
         """
 
         latest_user = str(text or "").strip()
@@ -577,8 +468,7 @@ class InteractiveSession:
 
         self.messages.append({"role": "user", "content": latest_user})
 
-        # Build extraction window early, but schedule only after rewrite+retrieval so the
-        # extraction input can use the same rewritten query and top-1 retrieval reference.
+        # Build extraction window early.
         early_window = (
             list(extract_window)
             if extract_window is not None
@@ -588,33 +478,6 @@ class InteractiveSession:
             str(m.get("role") or "").strip().lower() == "assistant" for m in (early_window or [])
         )
 
-        # 1) Rewrite query (optional) then retrieve Skills for this turn.
-        original_query = latest_user
-        search_query = latest_user
-        rewritten_query: Optional[str] = None
-
-        rewrite_mode = (self.config.rewrite_mode or "auto").strip().lower()
-        if rewrite_mode != "never" and self.query_rewriter is not None:
-            rewritten = self.query_rewriter.rewrite(query=latest_user, messages=self.messages)
-            if rewritten and rewritten.strip():
-                rewritten_query = rewritten.strip()
-                if rewrite_mode in {"auto", "always"}:
-                    search_query = rewritten_query
-
-        retrieved = retrieve_hits_by_scope(
-            sdk=self.sdk,
-            query=search_query,
-            user_id=self.config.user_id,
-            scope=self.config.skill_scope,
-            top_k=self.config.top_k,
-            min_score=float(getattr(self.config, "min_score", 0.0) or 0.0),
-            allow_partial_vectors=False,
-        )
-        hits = list(retrieved.get("hits") or [])
-        hits_user = list(retrieved.get("hits_user") or [])
-        hits_library = list(retrieved.get("hits_library") or [])
-        retrieval_error = str(retrieved.get("error") or "")
-
         if self._should_trigger_auto_extraction() and has_assistant_in_window and early_window:
             total_turns_abs = sum(
                 1
@@ -622,11 +485,9 @@ class InteractiveSession:
                 if str(m.get("role") or "").strip().lower() == "assistant"
             )
             self._turns_at_last_extract_check = int(total_turns_abs)
-            top_ref = _top_reference_from_hits(hits, user_id=self.config.user_id)
             job_id = self._start_background_extraction(
                 early_window,
                 trigger="auto",
-                retrieval_reference=top_ref,
             )
             extraction_scheduled = {
                 "trigger": "auto",
@@ -638,59 +499,22 @@ class InteractiveSession:
                 "skill_mds": [],
             }
 
-        skills_for_use = [h.skill for h in hits]
-        selected_for_use = list(skills_for_use)
-        if self.skill_selector is not None and skills_for_use:
-            selected = self.skill_selector.select(
-                query=latest_user, messages=self.messages, skills=skills_for_use
-            )
-            selected_for_use = list(selected or [])
-
-        selected_for_context = select_skills_for_context(
-            selected_for_use,
-            query=search_query,
-            max_chars=self.sdk.config.max_context_chars,
-        )
-        use_skills = bool(selected_for_context)
-        context = (
-            render_skills_context(
-                selected_for_context,
-                query=search_query,
-                max_chars=self.sdk.config.max_context_chars,
-            )
-            if use_skills
-            else ""
-        )
-
-        # 2) Generate assistant response.
-        assistant = self._generate_assistant_response(context=context, use_skills=use_skills)
+        # Generate assistant response.
+        assistant = self._generate_assistant_response()
         self.messages.append({"role": "assistant", "content": assistant})
         usage = self._schedule_usage_tracking(
             query=latest_user,
             assistant_reply=assistant,
-            hits=hits,
-            selected_for_context=selected_for_context,
+            hits=[],
+            selected_for_context=[],
         )
 
-        # 3) Stage the latest window for potential extraction on the next turn.
+        # Stage the latest window for potential extraction on the next turn.
         window = self.messages[-self.config.ingest_window :]
         self._pending = _PendingExtraction(
             latest_user=latest_user,
             latest_assistant=assistant,
             messages=list(window),
-        )
-
-        retrieval = self._build_retrieval_info(
-            original_query=original_query,
-            rewritten_query=rewritten_query,
-            search_query=search_query,
-            hits=hits,
-            hits_user=hits_user,
-            hits_library=hits_library,
-            selected_for_use=selected_for_use,
-            selected_for_context=selected_for_context,
-            context_injected=use_skills,
-            error=retrieval_error or None,
         )
 
         chat_append = [
@@ -701,7 +525,6 @@ class InteractiveSession:
         return {
             "kind": "chat",
             "chat_append": chat_append,
-            "retrieval": retrieval,
             "usage": usage,
             "extraction": (extraction_scheduled if extraction_scheduled is not None else extraction_event),
             "config": asdict(self.config),
@@ -711,7 +534,7 @@ class InteractiveSession:
         """
         Streaming variant of `_handle_user_message`.
 
-        Retrieval and extraction scheduling are identical; only response emission differs.
+        Extraction scheduling is identical; only response emission differs.
         """
 
         latest_user = str(text or "").strip()
@@ -725,8 +548,7 @@ class InteractiveSession:
 
         self.messages.append({"role": "user", "content": latest_user})
 
-        # Build extraction window early, but schedule only after rewrite+retrieval so the
-        # extraction input can use the same rewritten query and top-1 retrieval reference.
+        # Build extraction window early.
         early_window = (
             list(extract_window)
             if extract_window is not None
@@ -740,33 +562,6 @@ class InteractiveSession:
         if extraction_event is not None:
             yield {"type": "extraction", "extraction": extraction_event}
 
-        # 1) Rewrite query (optional) then retrieve Skills for this turn.
-        original_query = latest_user
-        search_query = latest_user
-        rewritten_query: Optional[str] = None
-
-        rewrite_mode = (self.config.rewrite_mode or "auto").strip().lower()
-        if rewrite_mode != "never" and self.query_rewriter is not None:
-            rewritten = self.query_rewriter.rewrite(query=latest_user, messages=self.messages)
-            if rewritten and rewritten.strip():
-                rewritten_query = rewritten.strip()
-                if rewrite_mode in {"auto", "always"}:
-                    search_query = rewritten_query
-
-        retrieved = retrieve_hits_by_scope(
-            sdk=self.sdk,
-            query=search_query,
-            user_id=self.config.user_id,
-            scope=self.config.skill_scope,
-            top_k=self.config.top_k,
-            min_score=float(getattr(self.config, "min_score", 0.0) or 0.0),
-            allow_partial_vectors=False,
-        )
-        hits = list(retrieved.get("hits") or [])
-        hits_user = list(retrieved.get("hits_user") or [])
-        hits_library = list(retrieved.get("hits_library") or [])
-        retrieval_error = str(retrieved.get("error") or "")
-
         if self._should_trigger_auto_extraction() and has_assistant_in_window and early_window:
             total_turns_abs = sum(
                 1
@@ -774,11 +569,9 @@ class InteractiveSession:
                 if str(m.get("role") or "").strip().lower() == "assistant"
             )
             self._turns_at_last_extract_check = int(total_turns_abs)
-            top_ref = _top_reference_from_hits(hits, user_id=self.config.user_id)
             job_id = self._start_background_extraction(
                 early_window,
                 trigger="auto",
-                retrieval_reference=top_ref,
             )
             extraction_scheduled = {
                 "trigger": "auto",
@@ -790,50 +583,12 @@ class InteractiveSession:
                 "skill_mds": [],
             }
 
-        skills_for_use = [h.skill for h in hits]
-        selected_for_use = list(skills_for_use)
-        if self.skill_selector is not None and skills_for_use:
-            selected = self.skill_selector.select(
-                query=latest_user, messages=self.messages, skills=skills_for_use
-            )
-            selected_for_use = list(selected or [])
-
-        selected_for_context = select_skills_for_context(
-            selected_for_use,
-            query=search_query,
-            max_chars=self.sdk.config.max_context_chars,
-        )
-        use_skills = bool(selected_for_context)
-        context = (
-            render_skills_context(
-                selected_for_context,
-                query=search_query,
-                max_chars=self.sdk.config.max_context_chars,
-            )
-            if use_skills
-            else ""
-        )
-
-        retrieval = self._build_retrieval_info(
-            original_query=original_query,
-            rewritten_query=rewritten_query,
-            search_query=search_query,
-            hits=hits,
-            hits_user=hits_user,
-            hits_library=hits_library,
-            selected_for_use=selected_for_use,
-            selected_for_context=selected_for_context,
-            context_injected=use_skills,
-            error=retrieval_error or None,
-        )
-        # Emit retrieval diagnostics as soon as retrieval is complete.
-        yield {"type": "retrieval", "retrieval": retrieval}
         if extraction_scheduled is not None:
             yield {"type": "extraction", "extraction": extraction_scheduled}
 
-        # 2) Generate assistant response (streaming).
+        # Generate assistant response (streaming).
         assistant_parts: List[str] = []
-        for part in self._generate_assistant_response_stream(context=context, use_skills=use_skills):
+        for part in self._generate_assistant_response_stream():
             s = str(part or "")
             if not s:
                 continue
@@ -846,11 +601,11 @@ class InteractiveSession:
         usage = self._schedule_usage_tracking(
             query=latest_user,
             assistant_reply=assistant,
-            hits=hits,
-            selected_for_context=selected_for_context,
+            hits=[],
+            selected_for_context=[],
         )
 
-        # 3) Stage the latest window for potential extraction on the next turn.
+        # Stage the latest window for potential extraction on the next turn.
         window = self.messages[-self.config.ingest_window :]
         self._pending = _PendingExtraction(
             latest_user=latest_user,
@@ -865,7 +620,6 @@ class InteractiveSession:
         result = {
             "kind": "chat",
             "chat_append": chat_append,
-            "retrieval": retrieval,
             "usage": usage,
             "extraction": (extraction_scheduled if extraction_scheduled is not None else extraction_event),
             "config": asdict(self.config),
@@ -880,53 +634,15 @@ class InteractiveSession:
             "  /skills\n"
             "  /search <query>\n"
             "  /export <skill_id>\n"
-            "  /rewrite auto|always|never\n"
             "  /extract auto|always|never\n"
             "  /extract_every <n>\n"
             "  /extract_now [hint]\n"
-            "  /scope user|common|all\n"
             "  /clear\n"
             "\nNotes:\n"
             "  - In /extract auto mode, extraction is attempted once every N turns (N=extract_turn_limit).\n"
             "    Set N=1 to attempt extraction every turn.\n"
             "  - /extract_now [hint] schedules extraction in background (non-blocking).\n"
         )
-
-    def _build_retrieval_info(
-        self,
-        *,
-        original_query: str,
-        rewritten_query: Optional[str],
-        search_query: str,
-        hits: List[SkillHit],
-        selected_for_use: List[Skill],
-        selected_for_context: List[Skill],
-        context_injected: bool,
-        hits_user: Optional[List[SkillHit]] = None,
-        hits_library: Optional[List[SkillHit]] = None,
-        error: Optional[str] = None,
-    ) -> Dict[str, Any]:
-        """Builds a retrieval diagnostics payload consumed by CLI/Web views."""
-
-        hits_out = [_format_hit(h, rank=i) for i, h in enumerate(hits or [], start=1)]
-        hits_user_out = [_format_hit(h, rank=i) for i, h in enumerate(hits_user or [], start=1)]
-        hits_library_out = [_format_hit(h, rank=i) for i, h in enumerate(hits_library or [], start=1)]
-        return {
-            "original_query": str(original_query or ""),
-            "rewritten_query": (str(rewritten_query) if rewritten_query else None),
-            "search_query": str(search_query or ""),
-            "event_time": _now_ms(),
-            "scope": str(self.config.skill_scope),
-            "top_k": int(self.config.top_k),
-            "min_score": float(self.config.min_score),
-            "hits": hits_out,
-            "hits_user": hits_user_out,
-            "hits_library": hits_library_out,
-            "selected_for_use_ids": [str(s.id) for s in (selected_for_use or [])],
-            "selected_for_context_ids": [str(s.id) for s in (selected_for_context or [])],
-            "context_injected": bool(context_injected),
-            "error": (str(error) if error else None),
-        }
 
     def _build_extraction_info(
         self,
@@ -1197,25 +913,12 @@ class InteractiveSession:
                 pass
             self._maybe_restart_queued_usage_worker()
 
-    def _build_assistant_inputs(self, *, context: str, use_skills: bool) -> Tuple[str, str]:
+    def _build_assistant_inputs(self) -> Tuple[str, str]:
         """
         Assembles prompts for the chat model.
-
-        When skills are injected, prompt explicitly requires ignoring unrelated retrieved skills.
         """
 
-        if use_skills and (context or "").strip():
-            system = (
-                "You are a helpful assistant.\n"
-                "You have access to a list of retrieved Skills (capabilities) below. \n"
-                "**CRITICAL:** These Skills are retrieved automatically and may be irrelevant. \n"
-                "1. **Evaluate:** Use a Skill ONLY if it directly matches the user's current intent.\n"
-                "2. **Ignore:** If the Skills are unrelated to the query, YOU MUST IGNORE THEM COMPLETELY and answer normally.\n"
-                "3. **Silence:** Do not mention the existence of these Skills.\n\n"
-                f"Skills Context:\n{context}"
-            )
-        else:
-            system = "You are a helpful assistant.\n"
+        system = "You are a helpful assistant.\n"
         caller_system = str(getattr(self, "_caller_system_prompt", "") or "").strip()
         if caller_system:
             system += f"\n\nCaller System Instructions:\n{caller_system}"
@@ -1223,13 +926,13 @@ class InteractiveSession:
         user = f"Conversation:\n{history}\n\nRespond to the latest user message."
         return system, user
 
-    def _generate_assistant_response(self, *, context: str, use_skills: bool) -> str:
+    def _generate_assistant_response(self) -> str:
         """Blocking assistant generation with defensive error handling."""
 
         if self.chat_llm is None:
             return "Offline mode: no chat LLM configured."
 
-        system, user = self._build_assistant_inputs(context=context, use_skills=use_skills)
+        system, user = self._build_assistant_inputs()
         try:
             out = self.chat_llm.complete(
                 system=system,
@@ -1244,9 +947,6 @@ class InteractiveSession:
 
     def _generate_assistant_response_stream(
         self,
-        *,
-        context: str,
-        use_skills: bool,
     ) -> Iterator[str]:
         """Streaming assistant generation with chunk passthrough."""
 
@@ -1254,7 +954,7 @@ class InteractiveSession:
             yield "Offline mode: no chat LLM configured."
             return
 
-        system, user = self._build_assistant_inputs(context=context, use_skills=use_skills)
+        system, user = self._build_assistant_inputs()
         try:
             for chunk in self.chat_llm.stream_complete(
                 system=system,
@@ -1340,7 +1040,6 @@ class InteractiveSession:
         *,
         trigger: str,
         hint: Optional[str] = None,
-        retrieval_reference: Optional[Dict[str, Any]] = None,
     ) -> Optional[str]:
         """
         Schedules asynchronous extraction work.
@@ -1359,7 +1058,6 @@ class InteractiveSession:
             trigger=str(trigger or "auto"),
             hint=(str(hint).strip() if hint and str(hint).strip() else None),
             epoch=int(self._epoch),
-            retrieval_reference=(dict(retrieval_reference) if isinstance(retrieval_reference, dict) else None),
         )
 
         with self._bg_lock:
@@ -1411,12 +1109,6 @@ class InteractiveSession:
                             "trigger": str(current.trigger),
                             "session_id": str(self.session_id),
                             "job_id": str(current.job_id),
-                            # Explicitly pass top-1 retrieval reference (or None).
-                            "extraction_reference": (
-                                dict(current.retrieval_reference)
-                                if isinstance(current.retrieval_reference, dict)
-                                else None
-                            ),
                         },
                         hint=current.hint,
                     )
@@ -1509,6 +1201,6 @@ class InteractiveSession:
         if not callable(fn):
             return
         try:
-            fn(user_id=self.config.user_id, scope=self.config.skill_scope)
+            fn(user_id=self.config.user_id)
         except Exception:
             return

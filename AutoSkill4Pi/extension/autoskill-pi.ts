@@ -197,6 +197,24 @@ function stopBridge() {
   }
 }
 
+async function checkAndTriggerEvolution(ctx: ExtensionContext): Promise<void> {
+  if (!REPO_DIR) return;
+  try {
+    const out = await runPythonCapture(ctx, ["evolution-check"]);
+    const parsed = JSON.parse(out);
+    const candidates: Array<{ skill_id: string; skill_name: string; provenance_count: number }> =
+      parsed.evolution_candidates || [];
+    if (candidates.length > 0) {
+      const skillList = candidates.map((c) => `${c.skill_name} (${c.provenance_count} records)`).join(", ");
+      console.log(`[autoskill] Evolution needed for: ${skillList}`);
+      // Evolution skill will be picked up by the agent's native skill loader
+      // on the next session. The evolution SKILL.md is mirrored alongside other skills.
+    }
+  } catch {
+    // Non-critical: evolution check failure should not affect main flow
+  }
+}
+
 export default function (pi: ExtensionAPI) {
   pi.on("session_start", async (_event, ctx) => {
     // 仅当用户没有自配外部 LLM 端点时才起 bridge(避免多余监听)。
@@ -211,6 +229,8 @@ export default function (pi: ExtensionAPI) {
   pi.on("agent_settled", async (_event, ctx) => {
     liveExtractCounter = 0;
     runPiRuntime(ctx, ["process-dir", "--dir", PI_SESSIONS_ROOT], {});
+    // 异步检查是否需要进化（不阻塞主流程）
+    checkAndTriggerEvolution(ctx);
   });
 
   // 可选:活跃会话每 N turn 做一次 checkpoint 抽取(默认关闭)
@@ -234,6 +254,13 @@ export default function (pi: ExtensionAPI) {
     description: "重新把 SkillBank 镜像到 ~/.pi/agent/skills",
     handler: async (_args, ctx) => {
       runPiRuntime(ctx, ["mirror"], {});
+    },
+  });
+
+  pi.registerCommand("autoskill_evolve", {
+    description: "检查并触发 AutoSkill 技能进化（基于 darwin-skill 9 维评估）",
+    handler: async (_args, ctx) => {
+      await checkAndTriggerEvolution(ctx);
     },
   });
 

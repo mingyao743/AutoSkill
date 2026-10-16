@@ -22,7 +22,6 @@ from typing import Any, Dict, Iterable, List, Optional
 from .config import AutoSkillConfig
 from .management.formats.agent_skill import build_agent_skill_files
 from .models import Skill, SkillHit
-from .render import render_skills_context
 from .management.extraction import SkillExtractor, build_default_extractor
 from .management.maintenance import SkillMaintainer
 from .management.artifacts import (
@@ -574,24 +573,6 @@ class AutoSkill:
             max_file_bytes=max_file_bytes,
             max_depth=max_depth,
             reassign_ids=reassign_ids,
-        )
-
-    def render_context(
-        self,
-        query: str,
-        *,
-        user_id: str,
-        limit: Optional[int] = None,
-        scope: Optional[str] = None,  # user|common|library|all
-        filters: Optional[Dict[str, Any]] = None,
-    ) -> str:
-        """Run render context."""
-        hits = self.search(query, user_id=user_id, limit=limit, scope=scope, filters=filters)
-        skills = [h.skill for h in hits]
-        return render_skills_context(
-            skills,
-            query=query,
-            max_chars=self.config.max_context_chars,
         )
 
 

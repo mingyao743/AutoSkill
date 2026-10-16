@@ -28,7 +28,7 @@ from urllib.parse import urlparse
 
 from autoskill import AutoSkill, AutoSkillConfig
 from autoskill.config import default_store_path
-from autoskill.interactive import InteractiveConfig, LLMQueryRewriter
+from autoskill.interactive import InteractiveConfig
 from autoskill.interactive.session import InteractiveSession
 from autoskill.interactive.skill_versions import (
     apply_snapshot as _apply_snapshot,
@@ -150,14 +150,12 @@ class _SessionManager:
         sdk: AutoSkill,
         interactive_cfg: InteractiveConfig,
         chat_llm: Optional[Any],
-        query_rewriter: Optional[LLMQueryRewriter],
         llm_config: Optional[Dict[str, Any]] = None,
     ) -> None:
         """Run init."""
         self.sdk = sdk
         self.interactive_cfg = interactive_cfg
         self.chat_llm = chat_llm
-        self.query_rewriter = query_rewriter
         self.llm_config = dict(llm_config or {})
 
         self._lock = threading.Lock()
@@ -579,8 +577,6 @@ class _SessionManager:
                 sdk=self.sdk,
                 config=cfg,
                 chat_llm=self.chat_llm,
-                query_rewriter=self.query_rewriter,
-                skill_selector=None,
             )
             msgs = state.get("messages")
             if isinstance(msgs, list):
@@ -629,8 +625,6 @@ class _SessionManager:
             sdk=self.sdk,
             config=cfg,
             chat_llm=self.chat_llm,
-            query_rewriter=self.query_rewriter,
-            skill_selector=None,
         )
         now = self._now_ms()
         with self._lock:
@@ -1268,16 +1262,6 @@ def main() -> None:
     parser.add_argument("--store-dir", dest="store_dir", default=default_store_dir)
     parser.add_argument("--user-id", default=_env("AUTOSKILL_USER_ID", "u1"))
     parser.add_argument(
-        "--skill-scope",
-        default=_env("AUTOSKILL_SKILL_SCOPE", "all"),
-        help="user|common|all (common==shared library).",
-    )
-    parser.add_argument(
-        "--rewrite-mode",
-        default=_env("AUTOSKILL_REWRITE_MODE", "always"),
-        help="auto|always|never.",
-    )
-    parser.add_argument(
         "--extract-mode",
         default=_env("AUTOSKILL_EXTRACT_MODE", "auto"),
         help="auto|always|never.",
@@ -1293,20 +1277,14 @@ def main() -> None:
         default=_env("AUTOSKILL_GATING_MODE", "llm"),
         help="Deprecated (extraction gating is integrated into the extractor).",
     )
-    parser.add_argument("--min-score", type=float, default=float(_env("AUTOSKILL_MIN_SCORE", "0.4")))
-    parser.add_argument("--top-k", type=int, default=int(_env("AUTOSKILL_TOP_K", "1")))
     parser.add_argument("--library-dir", action="append", default=[], help="Additional read-only library root.")
     args = parser.parse_args()
 
     interactive_cfg = InteractiveConfig(
         store_dir=str(args.store_dir),
         user_id=str(args.user_id),
-        skill_scope=str(args.skill_scope),
-        rewrite_mode=str(args.rewrite_mode),
         extract_mode=str(args.extract_mode),
         extract_turn_limit=int(args.extract_turn_limit),
-        min_score=float(args.min_score),
-        top_k=int(args.top_k),
     ).normalize()
 
     llm_provider = str(args.llm_provider or "mock").lower()
@@ -1343,21 +1321,10 @@ def main() -> None:
 
     chat_llm = None if llm_provider == "mock" else build_llm(llm_cfg)
 
-    query_rewriter = None
-    if llm_provider != "mock":
-        rewrite_cfg = dict(llm_cfg)
-        if str(rewrite_cfg.get("provider") or "").lower() in {"glm", "bigmodel", "zhipu"}:
-            try:
-                rewrite_cfg["max_tokens"] = min(int(rewrite_cfg.get("max_tokens", 30000)), 30000)
-            except Exception:
-                rewrite_cfg["max_tokens"] = 30000
-        query_rewriter = LLMQueryRewriter(build_llm(rewrite_cfg))
-
     manager = _SessionManager(
         sdk=sdk,
         interactive_cfg=interactive_cfg,
         chat_llm=chat_llm,
-        query_rewriter=query_rewriter,
         llm_config=llm_cfg,
     )
 

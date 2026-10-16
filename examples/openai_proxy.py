@@ -53,10 +53,6 @@ def main() -> None:
     )
     parser.add_argument("--store-dir", dest="store_dir", default=default_store_dir)
     parser.add_argument("--user-id", default=_env("AUTOSKILL_USER_ID", "u1"))
-    parser.add_argument("--skill-scope", default=_env("AUTOSKILL_SKILL_SCOPE", "all"), help="user|common|all")
-    parser.add_argument("--rewrite-mode", default=_env("AUTOSKILL_REWRITE_MODE", "always"), help="never|auto|always")
-    parser.add_argument("--min-score", type=float, default=float(_env("AUTOSKILL_MIN_SCORE", "0.4")))
-    parser.add_argument("--top-k", type=int, default=int(_env("AUTOSKILL_TOP_K", "1")))
     parser.add_argument("--history-turns", type=int, default=int(_env("AUTOSKILL_HISTORY_TURNS", "100")))
     parser.add_argument("--ingest-window", type=int, default=int(_env("AUTOSKILL_INGEST_WINDOW", "6")))
     parser.add_argument("--extract-enabled", default=_env("AUTOSKILL_EXTRACT_ENABLED", "1"), help="1|0")
@@ -149,10 +145,6 @@ def main() -> None:
 
     proxy_cfg = AutoSkillProxyConfig(
         user_id=str(args.user_id),
-        skill_scope=str(args.skill_scope),
-        rewrite_mode=str(args.rewrite_mode),
-        min_score=float(args.min_score),
-        top_k=int(args.top_k),
         history_turns=int(args.history_turns),
         extract_enabled=bool(extract_enabled),
         ingest_window=int(args.ingest_window),

@@ -218,13 +218,59 @@ def process_sessions(session_files: List[str], *, dry_run: bool = False) -> Dict
     )
     result["upserted"] = int(extraction.get("upserted_count", 0) or 0)
     result["extraction_errors"] = extraction.get("errors", [])
+    result["upserted_skills"] = [str(s.get("id", "")) for s in extraction.get("skills", []) if s.get("id")]
 
     mirror = mirror_user_skills(sdk, user_id=user_id(), pi_skills_dir=pi_skills_dir())
     result["mirrored"] = int(mirror.get("count", 0) or 0)
     result["mirror_dir"] = mirror.get("pi_skills_dir")
 
     _append_ledger(fingerprints, session_paths=new_files)
+
+    evolution_needed = _check_evolution_needed(sdk, updated_skills=result.get("upserted_skills", []))
+    if evolution_needed:
+        result["evolution_needed"] = evolution_needed
     return result
+
+
+def _check_evolution_needed(sdk: Any, *, updated_skills: Optional[List[str]] = None) -> List[Dict[str, Any]]:
+    """
+    Check which skills have accumulated enough provenance to warrant evolution.
+
+    Returns a list of {"skill_id": ..., "skill_name": ..., "provenance_count": ...}
+    for skills that meet the evolution threshold.
+    """
+    threshold = int(_env("AUTOSKILL_EVOLUTION_THRESHOLD", "5") or 5)
+    if threshold <= 0:
+        return []
+
+    provenance_file = os.path.join(store_dir(), "index", f"online_skill_provenance_{user_id()}.json")
+    if not os.path.isfile(provenance_file):
+        return []
+
+    try:
+        with open(provenance_file, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception:
+        return []
+
+    skills_map = data.get("skills", {})
+    candidates: List[Dict[str, Any]] = []
+
+    skill_ids_to_check = updated_skills if updated_skills else list(skills_map.keys())
+    for sid in skill_ids_to_check:
+        record = skills_map.get(sid)
+        if not record:
+            continue
+        history_count = len(record.get("history", []))
+        sources_count = len(record.get("sources", []))
+        total = history_count + sources_count
+        if total >= threshold:
+            candidates.append({
+                "skill_id": sid,
+                "skill_name": record.get("name", sid),
+                "provenance_count": total,
+            })
+    return candidates
 
 
 # --------------------------- CLI ---------------------------
@@ -274,6 +320,13 @@ def _cmd_search(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_evolution_check(args: argparse.Namespace) -> int:
+    sdk = build_sdk()
+    candidates = _check_evolution_needed(sdk)
+    print(json.dumps({"evolution_candidates": candidates, "count": len(candidates)}, ensure_ascii=False, indent=2))
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="AutoSkill4Pi runtime")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -292,6 +345,9 @@ def build_parser() -> argparse.ArgumentParser:
     ps = sub.add_parser("search", help="Search skills for a query (for the Pi tool)")
     ps.add_argument("--query", required=True)
     ps.set_defaults(func=_cmd_search)
+
+    pe = sub.add_parser("evolution-check", help="Check which skills need evolution")
+    pe.set_defaults(func=_cmd_evolution_check)
     return p
 
 

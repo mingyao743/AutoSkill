@@ -13,8 +13,6 @@ from typing import Any, Dict, Optional
 
 from ..client import AutoSkill
 from .config import InteractiveConfig
-from .rewriting import LLMQueryRewriter
-from .selection import LLMSkillSelector
 from .server import AutoSkillProxyConfig, AutoSkillProxyRuntime
 from .session import InteractiveSession
 from ..management.bootstrap import run_service_startup_maintenance
@@ -36,8 +34,6 @@ class AutoSkillRuntime:
         embeddings_config: Dict[str, Any],
         interactive_config: Optional[InteractiveConfig] = None,
         proxy_config: Optional[AutoSkillProxyConfig] = None,
-        query_rewriter: Optional[LLMQueryRewriter] = None,
-        skill_selector: Optional[LLMSkillSelector] = None,
     ) -> None:
         """Run init."""
         self.sdk = sdk
@@ -52,16 +48,6 @@ class AutoSkillRuntime:
             async_run=True,
         )
 
-        if query_rewriter is not None:
-            self.query_rewriter = query_rewriter
-        else:
-            provider = str(self.llm_config.get("provider") or "mock").lower()
-            if provider == "mock" or str(self.interactive_config.rewrite_mode).lower() == "never":
-                self.query_rewriter = None
-            else:
-                self.query_rewriter = LLMQueryRewriter(build_llm(dict(self.llm_config)))
-        self.skill_selector = skill_selector
-
     def new_session(
         self,
         *,
@@ -75,8 +61,6 @@ class AutoSkillRuntime:
             sdk=self.sdk,
             config=cfg,
             chat_llm=chat_llm,
-            query_rewriter=self.query_rewriter,
-            skill_selector=self.skill_selector,
         )
 
     def new_proxy_runtime(
@@ -91,8 +75,6 @@ class AutoSkillRuntime:
             llm_config=dict(self.llm_config),
             embeddings_config=dict(self.embeddings_config),
             config=cfg,
-            query_rewriter=self.query_rewriter,
-            skill_selector=self.skill_selector,
         )
 
     def create_proxy_server(

@@ -61,7 +61,6 @@ class OpenClawSkillRuntime(AutoSkillProxyRuntime):
     Runtime specialized for OpenClaw plugin mode.
 
     The service does not act as a chat model proxy. It focuses on:
-    - query rewrite + skill retrieval
     - background extraction/update scheduling
     - skill management APIs
     """
@@ -73,8 +72,6 @@ class OpenClawSkillRuntime(AutoSkillProxyRuntime):
         llm_config: Dict[str, Any],
         embeddings_config: Dict[str, Any],
         config: Optional[Any] = None,
-        query_rewriter: Optional[Any] = None,
-        skill_selector: Optional[Any] = None,
         main_turn_proxy_config: Optional[OpenClawMainTurnProxyConfig] = None,
         skill_install_config: Optional[OpenClawSkillInstallConfig] = None,
         conversation_archive_config: Optional[OpenClawConversationArchiveConfig] = None,
@@ -86,8 +83,6 @@ class OpenClawSkillRuntime(AutoSkillProxyRuntime):
             llm_config=llm_config,
             embeddings_config=embeddings_config,
             config=config,
-            query_rewriter=query_rewriter,
-            skill_selector=skill_selector,
         )
         proxy_cfg = main_turn_proxy_config or OpenClawMainTurnProxyConfig(
             enabled=True,
