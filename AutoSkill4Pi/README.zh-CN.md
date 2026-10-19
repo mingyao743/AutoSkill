@@ -7,32 +7,47 @@
 ## 架构
 
 ```
-<REPO>/AutoSkill4Pi/skills/    ← 元技能（创建/进化技能的指引）
+<REPO>/AutoSkill4Pi/skills/    ← 元技能（创建/进化/捕获的指引）
 ├── create-skill/
 │   └── SKILL.md               ← "如何创建技能"（融入 superpowers best practice）
-└── evolve-skill/
-    └── SKILL.md               ← "如何进化技能"（darwin 9 维评估）
+├── evolve-skill/
+│   └── SKILL.md               ← "如何进化技能"（darwin 9 维评估）
+└── capturing-insights/
+    └── SKILL.md               ← "如何捕获洞察"（闪记 → 技能的中间层）
 
-~/.pi/agent/skills/            ← 用户技能（agent 学到的技能）
-├── code-review-checklist/
-│   └── SKILL.md               ← agent 用 Pi 原生 file tool 读写
-└── formal-report-style/
-    └── SKILL.md
+~/.pi/agent/
+├── skills/                    ← 用户技能（agent 学到的成熟技能）
+│   ├── code-review-checklist/
+│   │   └── SKILL.md           ← agent 用 Pi 原生 file tool 读写
+│   └── formal-report-style/
+│       └── SKILL.md
+└── insights/                  ← 洞察闪记（原始观察，待提炼为技能）
+    ├── 2026-10-19-json-trailing-commas.md
+    └── 2026-10-19-api-rate-limit.md
 
-Pi extension (autoskill-pi.ts, ~100 行):
+Pi extension (autoskill-pi.ts, ~120 行):
   before_agent_start →
     1. 读 <REPO>/AutoSkill4Pi/skills/*/SKILL.md（元技能，全文注入）
     2. 读 ~/.pi/agent/skills/*/SKILL.md（用户技能，摘要注入）
-    3. 拼入 system prompt
+    3. 读 ~/.pi/agent/insights/*.md（洞察闪记，标题列表注入）
+    4. 拼入 system prompt
 
 Agent:
-  创建技能 → 按 creating-skills 指引 → write SKILL.md
+  捕获洞察 → 按 capturing-insights 指引 → write insights/*.md
+  创建技能 → 按 creating-skills 指引 → write skills/*/SKILL.md
+  合并洞察 → 3+ 条同类 insight → 提炼为 skill
   更新技能 → edit SKILL.md, bump version
   进化技能 → 按 evolving-skills 指引 → 读 darwin 9 维 → 改写 SKILL.md
 ```
 
+**知识沉淀分层：**
+- **L1 原料层**：Pi 会话 JSONL（原始对话记录）
+- **L2 半成品层**：`insights/`（闪记/洞察，原始观察）
+- **L3 成品层**：`skills/`（用户技能，可复用制品）
+- **L4 认知内核层**：元技能（创建/进化/捕获的方法论）
+
 **没有后台 pipeline，没有 Python 子进程，没有 OpenAI 兼容桥。**
-Extension 只做一件事：每次 agent 回复前，告诉它"你有哪些技能 + 如何创建/进化技能"。
+Extension 只做一件事：每次 agent 回复前，告诉它"你有哪些技能 + 有哪些洞察 + 如何创建/进化/捕获"。
 
 ## 安装
 
@@ -42,8 +57,9 @@ mkdir -p ~/.pi/agent/extensions/autoskill
 cp AutoSkill4Pi/extension/autoskill-pi.ts ~/.pi/agent/extensions/autoskill/
 cp AutoSkill4Pi/extension/package.json ~/.pi/agent/extensions/autoskill/
 
-# 2. 创建技能目录
+# 2. 创建技能和洞察目录
 mkdir -p ~/.pi/agent/skills
+mkdir -p ~/.pi/agent/insights
 ```
 
 环境变量：
@@ -150,8 +166,9 @@ Only for explicit multi-step AI operations.
 
 | 元技能 | 作用 |
 |--------|------|
-| `creating-skills` | 何时创建、SKILL.md 格式、命名规范、description 陷阱、反模式 |
+| `creating-skills` | 何时创建、SKILL.md 格式、命名规范、description 陷阱、从洞察合并为技能 |
 | `evolving-skills` | darwin 9 维评估、进化时机、版本升级规则、常见进化模式 |
+| `capturing-insights` | 何时捕获洞察、insight 格式、insight → skill 合并流程 |
 
 修改元技能不需要改 TypeScript 代码，直接编辑对应的 SKILL.md 即可。
 
@@ -171,11 +188,12 @@ AutoSkill 主项目（Python）作为可选离线工具箱独立存在：
 ```
 AutoSkill4Pi/
 ├── extension/
-│   ├── autoskill-pi.ts        # ~100 行，读元技能 + 用户技能 → 注入 prompt
+│   ├── autoskill-pi.ts        # ~120 行，读元技能 + 用户技能 + 洞察 → 注入 prompt
 │   └── package.json
-├── skills/                    # 元技能（创建/进化技能的指引）
+├── skills/                    # 元技能（创建/进化/捕获的指引）
 │   ├── create-skill/SKILL.md  # creating-skills
-│   └── evolve-skill/SKILL.md  # evolving-skills（含 darwin 9 维）
+│   ├── evolve-skill/SKILL.md  # evolving-skills（含 darwin 9 维）
+│   └── capturing-insights/SKILL.md  # capturing-insights
 ├── runtime/                   # 可选离线工具箱（extension 不调用）
 │   ├── pi_session_adapter.py
 │   ├── pi_skill_mirror.py

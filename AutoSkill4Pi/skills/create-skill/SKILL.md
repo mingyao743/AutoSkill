@@ -1,8 +1,8 @@
 ---
 name: creating-skills
-description: Use when creating new skills, editing existing skills, or when user corrects your approach, establishes reusable rules, or expresses clear preferences
-version: 0.2.0
-triggers: [create skill, edit skill, user correction, reusable rule, clear preference, repeated pattern]
+description: Use when creating new skills, editing existing skills, or when user corrects your approach, establishes reusable rules, expresses clear preferences, or affirms your good answers
+version: 0.3.0
+triggers: [create skill, edit skill, user correction, reusable rule, clear preference, repeated pattern, user affirmation, good answer validated]
 tags: [skill creation, best practice, knowledge capture, learning]
 ---
 
@@ -16,16 +16,38 @@ Skills are reusable reference guides stored as SKILL.md files. They help future 
 
 ## When to Create
 
-**Create when:**
+**Create when (validated signals — go directly to skill):**
 - User corrects your approach ("no, it should be...", "wrong, change to...")
 - User establishes a reusable rule ("from now on, always...")
 - User expresses a clear preference ("don't use...", "prefer...")
-- You discover a non-obvious pattern that took multiple tries to get right
+- You give a good answer and user affirms or adds key information ("yes exactly", "and also remember to...")
+- You successfully solve a complex problem and the solution is clearly reusable
 
 **Don't create for:**
 - One-off solutions specific to a single task
 - Standard practices well-documented elsewhere
 - Project-specific conventions (put in project instructions instead)
+- Interesting but unproven patterns → write an insight first (see capturing-insights)
+
+**Validation principle:**
+- User corrections/rules/preferences = **already validated** → create skill directly
+- Your own good responses + user affirmation = **validated** → create skill directly
+- Interesting observations without user confirmation = **unvalidated** → write insight first
+
+## From Insights to Skills
+
+Insights (`~/.pi/agent/insights/`) are raw observations. When they mature, consolidate into skills:
+
+**Consolidate when:**
+- 3+ insights share a common theme
+- You're creating a skill and notice existing insights cover the same topic
+- An insight has been referenced multiple times
+
+**How:**
+1. Review related insights together
+2. Identify the common pattern
+3. Create SKILL.md following this guide
+4. Archive or delete the consolidated insights
 
 ## SKILL.md Format
 
