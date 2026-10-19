@@ -1,18 +1,18 @@
 ---
 name: creating-skills
-description: Use when user corrects your approach, establishes reusable rules, expresses clear preferences, or when you discover a pattern worth preserving for future sessions
-version: 0.1.0
-triggers: [user correction, reusable rule, clear preference, repeated pattern, workflow optimization]
-tags: [skill creation, learning, best practice, knowledge capture]
+description: Use when creating new skills, editing existing skills, or when user corrects your approach, establishes reusable rules, or expresses clear preferences
+version: 0.2.0
+triggers: [create skill, edit skill, user correction, reusable rule, clear preference, repeated pattern]
+tags: [skill creation, best practice, knowledge capture, learning]
 ---
 
 # Creating Skills
 
 ## Overview
 
-Skills are reusable reference guides stored as SKILL.md files. Create them when you discover techniques, patterns, or preferences worth preserving.
+Skills are reusable reference guides stored as SKILL.md files. They help future sessions benefit from patterns, corrections, and preferences discovered in current sessions.
 
-**Core principle:** If the user corrected you or stated a rule, capture it as a skill so future sessions benefit.
+**Core principle:** If the user corrected you or stated a rule, capture it as a skill so future sessions don't repeat the mistake.
 
 ## When to Create
 
@@ -80,6 +80,10 @@ description: For code review
 description: Use when reviewing pull requests or before merging code changes
 ```
 
+**Why this matters:** When description summarizes workflow, agents may follow the description instead of reading the full skill content. A description saying "code review between tasks" caused an agent to do ONE review, even though the skill's flowchart clearly showed TWO reviews.
+
+**The trap:** Descriptions that summarize workflow create a shortcut agents will take. The skill body becomes documentation agents skip.
+
 ## Keyword Coverage
 
 Include words agents would search for:
@@ -87,14 +91,36 @@ Include words agents would search for:
 - Tools: actual commands, library names
 - Synonyms: cover variations (timeout/hang/freeze)
 
-## Token Efficiency
+## Conciseness (Critical)
 
 **Target:** < 200 words for frequently-loaded skills, < 500 for others.
 
-**Techniques:**
-- Don't repeat what's obvious from the skill name
-- Don't include multiple examples of the same pattern
-- Keep code examples inline only if < 50 lines
+**Default assumption:** Agents are already very smart. Only add context they don't already have.
+
+Challenge each piece of information:
+- "Does the agent really need this explanation?"
+- "Can I assume the agent knows this?"
+- "Does this paragraph justify its token cost?"
+
+**Good example (50 tokens):**
+```markdown
+## Extract PDF text
+Use pdfplumber for text extraction:
+```python
+import pdfplumber
+with pdfplumber.open("file.pdf") as pdf:
+    text = pdf.pages[0].extract_text()
+```
+```
+
+**Bad example (150 tokens):**
+```markdown
+## Extract PDF text
+PDF (Portable Document Format) files are a common file format that contains
+text, images, and other content. To extract text from a PDF, you'll need to
+use a library. There are many libraries available for PDF processing, but we
+recommend pdfplumber because it's easy to use and handles most cases well...
+```
 
 ## Common Mistakes
 
@@ -105,6 +131,8 @@ Include words agents would search for:
 | Vague triggers ("for testing") | Be specific: "Use when tests have race conditions" |
 | Narrative storytelling | Extract the reusable pattern, discard the story |
 | Multiple languages for examples | Pick one, make it excellent |
+| Too verbose | Assume agent is smart, remove obvious explanations |
+| Deeply nested references | Keep references one level deep from SKILL.md |
 
 ## Workflow
 
@@ -114,3 +142,27 @@ Include words agents would search for:
 4. Write body (Goal + Constraints & Style + Workflow if needed)
 5. Create directory and write file using your file tools
 6. Verify: would a future agent find this when facing the same problem?
+
+## Iterative Improvement
+
+Skills improve through real usage, not upfront perfection:
+
+1. **Create minimal skill** addressing the specific correction/rule
+2. **Use in real tasks** — observe if future sessions apply it correctly
+3. **Iterate based on observation** — if agent misses something, refine the skill
+4. **Bump version** when making significant changes (0.1.0 → 0.1.1 for fixes, 0.1.0 → 0.2.0 for restructuring)
+
+**Why this works:** You provide domain expertise, the agent reveals gaps through real usage, and iterative refinement improves skills based on observed behavior rather than assumptions.
+
+## Checklist
+
+Before finalizing a skill:
+
+- [ ] Description starts with "Use when..." and includes specific triggers
+- [ ] Description does NOT summarize workflow
+- [ ] Name is English kebab-case (gerund preferred)
+- [ ] SKILL.md body is concise (< 200 words for frequently-loaded)
+- [ ] Keywords cover error messages, symptoms, synonyms
+- [ ] No time-sensitive information
+- [ ] Consistent terminology throughout
+- [ ] Examples are concrete, not abstract
