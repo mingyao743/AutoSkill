@@ -7,25 +7,32 @@
 ## 架构
 
 ```
-~/.pi/agent/skills/          ← 唯一的数据存储
+<REPO>/AutoSkill4Pi/skills/    ← 元技能（创建/进化技能的指引）
+├── create-skill/
+│   └── SKILL.md               ← "如何创建技能"（融入 superpowers best practice）
+└── evolve-skill/
+    └── SKILL.md               ← "如何进化技能"（darwin 9 维评估）
+
+~/.pi/agent/skills/            ← 用户技能（agent 学到的技能）
 ├── code-review-checklist/
-│   └── SKILL.md             ← agent 用 Pi 原生 file tool 读写
-├── formal-report-style/
-│   └── SKILL.md
-└── darwin-skill/            ← 进化技能（元技能）
+│   └── SKILL.md               ← agent 用 Pi 原生 file tool 读写
+└── formal-report-style/
     └── SKILL.md
 
-Pi extension (autoskill-pi.ts, ~80 行):
-  before_agent_start → 读目录 → 注入技能摘要 + 引导到 system prompt
+Pi extension (autoskill-pi.ts, ~100 行):
+  before_agent_start →
+    1. 读 <REPO>/AutoSkill4Pi/skills/*/SKILL.md（元技能，全文注入）
+    2. 读 ~/.pi/agent/skills/*/SKILL.md（用户技能，摘要注入）
+    3. 拼入 system prompt
 
 Agent:
-  创建技能 → write SKILL.md
-  更新技能 → edit SKILL.md
-  进化技能 → 读 darwin-skill + 当前技能 → 改写 SKILL.md
+  创建技能 → 按 creating-skills 指引 → write SKILL.md
+  更新技能 → edit SKILL.md, bump version
+  进化技能 → 按 evolving-skills 指引 → 读 darwin 9 维 → 改写 SKILL.md
 ```
 
 **没有后台 pipeline，没有 Python 子进程，没有 OpenAI 兼容桥。**
-Extension 只做一件事：每次 agent 回复前，告诉它"你有哪些技能，何时创建/更新/进化"。
+Extension 只做一件事：每次 agent 回复前，告诉它"你有哪些技能 + 如何创建/进化技能"。
 
 ## 安装
 
@@ -39,45 +46,43 @@ cp AutoSkill4Pi/extension/package.json ~/.pi/agent/extensions/autoskill/
 mkdir -p ~/.pi/agent/skills
 ```
 
-可选环境变量：
+环境变量：
 
 ```bash
-export AUTOSKILL_PI_SKILLS_DIR=~/.pi/agent/skills   # 默认值
+export AUTOSKILL_PI_REPO_DIR=/path/to/AutoSkill   # 必填：定位元技能目录
+export AUTOSKILL_PI_SKILLS_DIR=~/.pi/agent/skills  # 可选：用户技能目录
 ```
 
 ## 工作原理
 
 ### 1. 会话开始
 
-Extension 的 `before_agent_start` 读取 `~/.pi/agent/skills/*/SKILL.md`，注入 system prompt：
+Extension 的 `before_agent_start` 读取两类 SKILL.md，注入 system prompt：
 
 ```
 ### Skill Learning (AutoSkill)
 
 **Your current skills:**
-- code-review-checklist (v0.2.0): Checklist for reviewing code changes
-- formal-report-style (v0.1.0): Write formal reports in Chinese
+- code-review-checklist (v0.2.0): Use when reviewing pull requests
+- formal-report-style (v0.1.0): Use when writing reports in Chinese
 
-**When to create a skill:**
-- User corrects your approach
-- User establishes a reusable rule
-→ Create directory and write SKILL.md
+**Skill creation & evolution guidance:**
 
-**SKILL.md format:**
----
-name: english-kebab-case-name
-description: 1-2 sentences
-version: 0.1.0
----
-# Goal ...
-# Constraints & Style ...
+--- creating-skills SKILL.md (full content) ---
+--- evolving-skills SKILL.md (full content) ---
 ```
+
+元技能（creating-skills、evolving-skills）的全文注入，让 agent 知道：
+- **何时创建**：用户纠正、建立规则、表达偏好
+- **如何命名**：name 永远英文 kebab-case，推荐 -ing 形式
+- **description 陷阱**：只写触发条件，不总结 workflow（否则 agent 走捷径跳过正文）
+- **如何进化**：darwin 9 维评估（目标清晰度、约束完整性、工作流合理性……）
 
 ### 2. Agent 创建技能
 
 用户说："以后写代码注释都用中文"
 
-Agent 用 Pi 的 file write tool 创建：
+Agent 按 creating-skills 指引，用 Pi 的 file write tool 创建：
 
 ```
 ~/.pi/agent/skills/chinese-code-comments/SKILL.md
@@ -88,7 +93,7 @@ Agent 用 Pi 的 file write tool 创建：
 ```markdown
 ---
 name: chinese-code-comments
-description: 写中文代码注释
+description: 写代码注释时使用中文
 version: 0.1.0
 triggers: [写注释, 代码注释, code comments]
 tags: [代码, 中文, 注释]
@@ -107,14 +112,14 @@ Extension 注入时包含新技能 → agent 自动知道并遵循。
 
 ### 4. 进化
 
-Agent 发现某技能经常被纠正 → 读 darwin-skill 的 9 维度评估 → 改写 SKILL.md。
+Agent 发现某技能经常被纠正 → 按 evolving-skills 指引的 9 维度评估 → 改写 SKILL.md。
 
 ## SKILL.md 格式
 
 ```markdown
 ---
 name: english-kebab-case-name
-description: 1-2 sentences, what this skill does and when to use it
+description: Use when [specific triggering conditions and symptoms]
 version: 0.1.0
 triggers: [intent phrase 1, intent phrase 2, intent phrase 3]
 tags: [keyword1, keyword2]
@@ -131,8 +136,24 @@ Only for explicit multi-step AI operations.
 ```
 
 **命名规范**：
-- `name`：永远英文 kebab-case
-- `description` / `prompt` / `triggers` / `tags`：跟随用户语言
+- `name`：永远英文 kebab-case，推荐 -ing 形式（如 `creating-skills` > `skill-creation`）
+- `description`：只写触发条件（"Use when..."），**不总结 workflow**
+- `triggers` / `tags`：跟随用户语言，覆盖同义词和症状词
+
+**description 陷阱**（来自 superpowers writing-skills）：
+如果 description 总结了 workflow，agent 会走捷径直接按 description 做，跳过 SKILL.md 正文。
+所以 description 只描述"什么时候用"，不描述"做什么"。
+
+## 元技能（Meta-Skills）
+
+元技能是项目自带的"关于技能"的技能，存放在 `<REPO>/AutoSkill4Pi/skills/`：
+
+| 元技能 | 作用 |
+|--------|------|
+| `creating-skills` | 何时创建、SKILL.md 格式、命名规范、description 陷阱、反模式 |
+| `evolving-skills` | darwin 9 维评估、进化时机、版本升级规则、常见进化模式 |
+
+修改元技能不需要改 TypeScript 代码，直接编辑对应的 SKILL.md 即可。
 
 ## 与 AutoSkill 主项目的关系
 
@@ -141,7 +162,7 @@ Only for explicit multi-step AI operations.
 AutoSkill 主项目（Python）作为可选离线工具箱独立存在：
 - 离线批处理大量会话
 - 高级语义检索（BM25 + vector）
-- 复杂进化 pipeline
+- 复杂进化 Pipeline
 
 唯一联系：SKILL.md 格式约定。
 
@@ -150,8 +171,11 @@ AutoSkill 主项目（Python）作为可选离线工具箱独立存在：
 ```
 AutoSkill4Pi/
 ├── extension/
-│   ├── autoskill-pi.ts        # ~80 行，读目录 + 注入 prompt
+│   ├── autoskill-pi.ts        # ~100 行，读元技能 + 用户技能 → 注入 prompt
 │   └── package.json
+├── skills/                    # 元技能（创建/进化技能的指引）
+│   ├── create-skill/SKILL.md  # creating-skills
+│   └── evolve-skill/SKILL.md  # evolving-skills（含 darwin 9 维）
 ├── runtime/                   # 可选离线工具箱（extension 不调用）
 │   ├── pi_session_adapter.py
 │   ├── pi_skill_mirror.py
@@ -163,10 +187,11 @@ AutoSkill4Pi/
 
 | | 旧架构 | 极简架构 |
 |---|---|---|
-| Extension 代码量 | ~300 行 | ~80 行 |
+| Extension 代码量 | ~300 行 | ~100 行 |
 | 依赖 | Python + bridge + SkillBank | 文件系统 |
 | Tool 数量 | 4 个 | 0 个 |
 | Python 子进程 | 每次 tool 调用 | 无 |
+| 技能指引 | 硬编码在 TS 里 | 元技能 SKILL.md（可编辑） |
 | 技能存储 | SkillBank + mirror | 直接写 ~/.pi/agent/skills/ |
 | 去重/版本 | Python maintainer | Agent 自己判断 |
 | 搜索 | Python BM25 + vector | Agent grep / Pi 原生加载 |
