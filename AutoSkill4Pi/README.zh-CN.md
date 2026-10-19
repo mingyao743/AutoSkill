@@ -1,51 +1,54 @@
 # AutoSkill4Pi
 
-让 [Pi Coding Agent](https://pi.dev/) 在不改核心、不替换 system prompt 的前提下，随使用持续学会新技能。
+让 [Pi Coding Agent](https://pi.dev/) 在使用中自主学会新技能。
 
-AutoSkill4Pi 是 [AutoSkill](../README.zh-CN.md)（经验驱动终身学习 ELL）到 Pi 的集成，沿用
-`AutoSkill4OpenClaw` 已验证的 **adapter + SkillBank 真源 + 原生 skills 镜像** 模式：
+AutoSkill4Pi 是 [AutoSkill](../README.zh-CN.md)（经验驱动终身学习 ELL）到 Pi 的集成。
+Agent 自己决定何时抽取技能、何时更新技能——不需要后台 pipeline，不需要 OpenAI 兼容桥。
 
-- 每个会话收口后，自动从完整 Pi 会话轨迹里抽取可复用技能；
-- 发现更好做法时，自动合并/更新旧技能并递增版本（v0.1.0 → v0.1.1）；
-- 把当前有效技能镜像到 Pi **用户级** `~/.pi/agent/skills/`，由 Pi 原生渐进式技能加载机制去发现与使用；
-- 抽取所用 LLM **复用 Pi 当前模型**（通过 extension 内置的本地 OpenAI 兼容 bridge），无需另配一套模型/key。
-
-## 运行形态：Extension adapter（形态 A）
+## 核心架构
 
 ```
 Pi 进程
   └─ extension: autoskill-pi.ts
-       ├─ session_start      → 启动本地模型 bridge（OpenAI 兼容 /v1/chat/completions）
-       ├─ agent_settled      → 后台拉起 Python runtime：扫描 Pi 会话目录做抽取/维护 + 进化检查
-       ├─ /autoskill_extract_now、/autoskill_sync、/autoskill_evolve 命令
-       └─ autoskill_search 工具（模型可主动检索技能库，只读）
+       ├─ before_agent_start → 注入技能摘要 + 抽取引导到 system prompt
+       ├─ autoskill_create   → agent 主动创建技能（写入 SkillBank + mirror）
+       ├─ autoskill_update   → agent 主动更新技能（版本递增）
+       ├─ autoskill_list     → agent 查看技能列表
+       └─ autoskill_search   → agent 按关键词检索技能
                                   │
                                   ▼
-        AutoSkill4Pi/runtime (Python, provider=generic → bridge)
-          ├─ pi_session_adapter  Pi JSONL → 轨迹记录（活跃分支/工具事件/成败）
-          ├─ 离线轨迹抽取        add/merge/discard + 版本演进 → SkillBank 真源
-          ├─ 进化检查            provenance 累积 → 触发 darwin-skill 进化循环
-          └─ pi_skill_mirror     SkillBank → ~/.pi/agent/skills（带托管标记）
+        AutoSkill4Pi/runtime (Python, 纯存储层)
+          ├─ SkillBank CRUD      技能增删改查 + 版本管理
+          ├─ pi_skill_mirror     SkillBank → ~/.pi/agent/skills（带托管标记）
+          └─ pi_session_adapter  Pi JSONL → 轨迹记录（兼容离线批处理）
 ```
 
-设计原则（与 OpenClaw 集成一致）：
-- SkillBank 是技能**真源**；`~/.pi/agent/skills` 只是安装镜像，非真源；
-- 镜像只覆盖 AutoSkill 自己创建的目录（`.autoskill-managed.json` 标记）；同名的人工技能改用 `<slug>-autoskill` 后缀并存，**绝不覆盖**；
-- 检索注入默认交给 Pi 原生技能机制，不做第二层重复检索；
-- 防递归：AutoSkill 注入的 `custom_message`（`customType` 以 `autoskill` 开头）在转换时被过滤，不会被再次抽取。
+**设计原则**：
+- **Agent 是抽取引擎**：agent 有完整对话上下文，比后台 pipeline 更懂"该抽什么"；
+- **SkillBank 是真源**：`~/.pi/agent/skills` 只是镜像，非真源；
+- **镜像安全**：只覆盖 AutoSkill 创建的目录（`.autoskill-managed.json` 标记），同名人工技能用 `<slug>-autoskill` 后缀并存，绝不覆盖；
+- **无桥架构**：不再需要 OpenAI 兼容 bridge，agent 自己就是 LLM。
 
-## Pi 会话格式（对接依据）
+## 工作流程
 
-来源：Pi 官方文档 `docs/sessions.md` 与 `docs/session-format.md`。
+```
+1. 会话开始
+   before_agent_start → agent 看到当前技能列表 + 抽取引导
 
-- 存储：`~/.pi/agent/sessions/--<cwd 转义>--/<时间戳>_<session-id>.jsonl`
-- 结构：JSONL，条目用 `id`/`parentId` 构成**树**；模型只看 leaf→root 的**活跃分支**
-- 关键条目：`session`(header) / `message`(user|assistant|toolResult|system) / `compaction` / `branch_summary` / `custom_message` / `usage` / `model_change` 等
-- 转换器规则：user 回合为主证据；assistant 文本 + toolCall/toolResult 组成轨迹事件；system/usage/label 等元数据跳过；终态为报错 toolResult 判为不成功
+2. 会话进行中
+   agent 发现用户纠正/建立规则 → 调用 autoskill_create
+   → Python 写入 SkillBank → 自动 mirror 到 ~/.pi/agent/skills
+
+3. 后续会话
+   agent 通过 before_agent_start 看到新技能 → 直接复用
+
+4. 技能不好用？
+   agent 调用 autoskill_update → 版本递增（v0.1.0 → v0.1.1）
+```
 
 ## 安装
 
-前置：Python 3.10+（本仓库以 3.9 也能跑通核心）、已 `pip install -e .` 安装 autoskill、已安装可运行的 Pi。
+前置：Python 3.10+、已 `pip install -e .` 安装 autoskill、已安装可运行的 Pi。
 
 ```bash
 cd /path/to/AutoSkill
@@ -60,106 +63,129 @@ python3 AutoSkill4Pi/install.py --repo-dir "$(pwd)"
 启动 Pi 前设置环境变量：
 
 ```bash
-export AUTOSKILL_PI_REPO_DIR=/abs/path/to/AutoSkill   # 含 AutoSkill4Pi/ 的仓库根
-export AUTOSKILL_PI_PYTHON=python3                     # 安装了 autoskill 的解释器
+export AUTOSKILL_PI_REPO_DIR=/abs/path/to/AutoSkill
+export AUTOSKILL_PI_PYTHON=python3
 ```
 
-然后正常使用 `pi`。会话收口后会自动触发抽取；也可随时 `/autoskill_extract_now` 主动触发、`/autoskill_sync` 重新镜像。
+## Agent 工具
 
-### 验证技能已产出并被 Pi 使用
+### autoskill_create
 
-```bash
-find ~/.pi/autoskill/SkillBank/Users -name SKILL.md | head
-find ~/.pi/agent/skills -name SKILL.md | head
+创建新技能。当用户纠正你的做法、建立可复用规则、或表达明确偏好时调用。
+
+参数：
+- `name`（必填）：英文 kebab-case，如 `code-review-checklist`
+- `description`（必填）：1-2 句话说明做什么、何时用
+- `prompt`（必填）：技能 prompt，包含 `# Goal` + `# Constraints & Style`
+- `triggers`：3-5 个触发意图短语
+- `tags`：1-6 个关键词
+
+### autoskill_update
+
+更新已有技能。当技能不好用或用户再次纠正了技能覆盖的场景时调用。
+
+参数：
+- `skill_id`（必填）：要更新的技能 ID
+- `name` / `description` / `prompt` / `triggers` / `tags`：可选更新字段
+
+### autoskill_list
+
+列出所有技能，返回 ID、名称、版本、描述。
+
+### autoskill_search
+
+按关键词检索技能。开始任务前检查是否有相关技能。
+
+参数：
+- `query`（必填）：检索关键词
+
+## System Prompt 注入
+
+`before_agent_start` 会自动注入以下内容到 system prompt：
+
+```
+### Skill Learning (AutoSkill)
+
+You have the ability to learn and reuse skills across sessions.
+
+**When to create a skill (call autoskill_create):**
+- User corrects your approach ("no, it should be...", "wrong, change to...")
+- User establishes a reusable rule ("from now on, always...")
+- User expresses a clear preference ("don't use...", "prefer...")
+
+**Skill naming rules:**
+- name: ALWAYS English kebab-case
+- description/prompt/triggers/tags: match user's language
+
+**Your current skills:**
+- code-review-checklist (v0.2.0): Checklist for reviewing code changes
+- formal-report-style (v0.1.0): Write formal reports in Chinese
 ```
 
-在 Pi 里对相关任务，Pi 会按 `description` 自动加载命中的技能；也可 `/skill:<name>` 强制加载。
-
-## 复用 Pi 当前模型（bridge）
-
-extension 在 `session_start` 时在本进程起一个仅监听 `127.0.0.1` 的 OpenAI 兼容
-`POST /v1/chat/completions` 服务，内部转调 Pi 的模型运行时
-（`ctx.modelRegistry.streamSimple(model, context, options)` → `AssistantMessageEventStream`，累加 `text_delta.delta`）。
-Python 侧以 `provider=generic` 指向该 bridge，从而**复用 Pi 正在用的模型与鉴权**，无需为抽取另配 provider/key。
-
-> 该调用签名已按本地安装的 `@earendil-works/pi-ai` / `@earendil-works/pi-coding-agent` 类型核对：
-> `streamSimple` 自带 request-time 鉴权，`getApiKeyAndHeaders(model)` 返回 `Promise<ResolvedRequestAuth>` 用于显式解析 key/header；
-> `Context` 为 `{ systemPrompt?, messages, tools? }`。无需 import `pi-ai`（复用 Pi 传入的 `ctx.modelRegistry`）。
-
-**env 注入策略**：extension 默认（用户未自配时）向 Python 注入 `AUTOSKILL_PI_LLM_PROVIDER=generic` 与指向 bridge 的
-`AUTOSKILL_PI_LLM_BASE_URL`；一旦检测到用户已在环境中设置 `AUTOSKILL_PI_LLM_BASE_URL`，则**尊重用户配置**、不注入 bridge（连 bridge 也不启动），
-`AUTOSKILL_PI_LLM_PROVIDER` / `API_KEY` / `MODEL` 一并沿用用户值。
-
-备选（不想用 bridge）：直接设 `AUTOSKILL_PI_LLM_BASE_URL=<任意 OpenAI 兼容端点>` 与
-`AUTOSKILL_PI_LLM_MODEL` / `AUTOSKILL_PI_LLM_API_KEY` 即可，extension 会自动让位、config-resolve 回退，无需改代码。
-embeddings 默认走本地 `hashing`（不联网、无需 key）；如需更强检索可设 `AUTOSKILL_PI_EMBEDDINGS_PROVIDER`。
+Agent 据此知道：有哪些技能、何时创建新技能、命名规范。
 
 ## 配置项（环境变量）
 
 | 变量 | 默认 | 说明 |
 |---|---|---|
 | `AUTOSKILL_PI_REPO_DIR` | （必填） | AutoSkill 仓库根（含 `AutoSkill4Pi/`） |
-| `AUTOSKILL_PI_PYTHON` | `python3` | 抽取运行时使用的解释器 |
+| `AUTOSKILL_PI_PYTHON` | `python3` | 运行时解释器 |
 | `AUTOSKILL_PI_USER_ID` | `pi` | 技能归属的 user_id |
 | `AUTOSKILL_PI_STORE_DIR` | `~/.pi/autoskill/SkillBank` | 技能真源目录 |
 | `AUTOSKILL_PI_SKILLS_DIR` | `~/.pi/agent/skills` | 用户级技能镜像目录 |
-| `AUTOSKILL_PI_LEDGER` | `~/.pi/autoskill/processed_ledger.jsonl` | 幂等去重账本 |
-| `AUTOSKILL_PI_SESSIONS_DIR` | `~/.pi/agent/sessions` | Pi 会话根目录 |
-| `AUTOSKILL_PI_LLM_PROVIDER` | `generic` | `generic`(bridge) / `mock` / `dashscope` 等 |
-| `AUTOSKILL_PI_LLM_BASE_URL` | 用户未设时注入 bridge | generic 端点；用户自配则尊重、不再注入 bridge |
-| `AUTOSKILL_PI_LLM_MODEL` / `_API_KEY` | bridge 注入（未自配时） | 同上；用户自配时沿用用户值 |
-| `AUTOSKILL_PI_EMBEDDINGS_PROVIDER` | `hashing` | `hashing`/`none`/`openai`/`generic`/`dashscope`/`glm` |
-| `AUTOSKILL_PI_LIVE_EXTRACT_EVERY_TURNS` | `0`(关) | >0 时活跃会话每 N turn 做一次 checkpoint 抽取 |
-| `AUTOSKILL_PI_BM25_WEIGHT` | `0.7` | 检索里 BM25 权重（离线场景偏 BM25） |
-| `AUTOSKILL_PI_INCLUDE_TOOL_EVENTS` | `1` | 轨迹事件是否并入抽取 |
-| `AUTOSKILL_PI_SUCCESS_ONLY` | `0` | 仅对成功会话抽取 |
 
-## CLI（Python 侧，可独立使用/离线批处理）
+## CLI（Python 侧）
 
 ```bash
-# 处理单个会话文件
-python3 -m AutoSkill4Pi.runtime.pi_runtime process --session <file.jsonl>
-# 扫描整个会话目录（账本幂等，自动补处理历史漏掉的会话；--dir 支持 ~ 前缀，
-#   未显式传 --dir 时回退读 AUTOSKILL_PI_SESSIONS_DIR，再回退 ~/.pi/agent/sessions）
-python3 -m AutoSkill4Pi.runtime.pi_runtime process-dir --dir ~/.pi/agent/sessions
-# 重新镜像 SkillBank → 用户级 skills
+# 列出所有技能
+python3 -m AutoSkill4Pi.runtime.pi_runtime list-skills --format json
+python3 -m AutoSkill4Pi.runtime.pi_runtime list-skills --format text
+
+# 创建技能（agent tool 内部调用）
+python3 -m AutoSkill4Pi.runtime.pi_runtime create-skill --payload '{"name":"...","description":"...","prompt":"..."}'
+
+# 更新技能
+python3 -m AutoSkill4Pi.runtime.pi_runtime update-skill --payload '{"skill_id":"...","description":"..."}'
+
+# 检索技能
+python3 -m AutoSkill4Pi.runtime.pi_runtime search --query "发布说明"
+
+# 重新镜像
 python3 -m AutoSkill4Pi.runtime.pi_runtime mirror
-# 检索技能（供 autoskill_search 工具）
-python3 -m AutoSkill4Pi.runtime.pi_runtime search --query "发布说明 指标"
+
+# 离线批处理（兼容旧流程）
+python3 -m AutoSkill4Pi.runtime.pi_runtime process-dir --dir ~/.pi/agent/sessions
 ```
 
-## 测试
+## 与旧架构的区别
 
-Python 侧核心（会话适配、抽取结构保真、镜像、账本去重、防递归、成败推断）已用 mock provider 端到端跑通：
-
-```bash
-python3 AutoSkill4Pi/tests/test_pipeline.py   # 10/10 通过
-```
-
-- `tests/fixtures/sample_session.jsonl`：含分支/系统消息/AutoSkill 注入/工具事件的合成会话
-- 覆盖：活跃分支重建、abandoned 分支排除、autoskill 流量过滤、tool_call/tool_result 事件、终态报错判失败、分支指纹去重、镜像写 Pi 兼容 SKILL.md、陈旧技能清理、不覆盖同名人工技能
-- 回归覆盖：多条结构化轨迹逐条抽取不被压平（`success_only`/`include_tool_events` 真实生效）、重复镜像就地更新不产生 `-2` 副本并清理历史重复目录、`--dir` 对 `~` 前缀正确展开
+| | 旧架构 | 新架构 |
+|---|---|---|
+| 抽取决策 | 后台 Python pipeline | Agent 自主决定 |
+| LLM 调用 | Bridge → Pi 模型 | Agent 自己就是 LLM |
+| 触发时机 | `agent_settled`（会话结束后） | `before_agent_start`（会话进行中） |
+| 技能延迟 | 下次会话才生效 | 当场创建，下轮可用 |
+| 上下文 | Python 只看文本 | Agent 有完整推理链 |
+| 复杂度 | TS + bridge + Python | TS + Python（纯存储） |
 
 ## 目录
 
 ```
 AutoSkill4Pi/
 ├── extension/
-│   ├── autoskill-pi.ts        # Pi 扩展：事件钩子 + 模型 bridge + 拉起 Python（形态 A）
+│   ├── autoskill-pi.ts        # Pi extension: context hook + skill tools
 │   └── package.json
 ├── runtime/
-│   ├── pi_session_adapter.py  # Pi 会话 JSONL → AutoSkill 轨迹记录
-│   ├── pi_skill_mirror.py     # SkillBank → 用户级 skills 镜像（托管标记/防覆盖/清理）
-│   └── pi_runtime.py          # 编排：配置/账本/抽取/镜像 + CLI
-├── tests/
-│   ├── fixtures/sample_session.jsonl
-│   └── test_pipeline.py
+│   ├── pi_session_adapter.py  # Pi JSONL → 轨迹记录（离线批处理用）
+│   ├── pi_skill_mirror.py     # SkillBank → ~/.pi/agent/skills 镜像
+│   └── pi_runtime.py          # SkillBank CRUD + CLI
 ├── install.py
 └── README.zh-CN.md
 ```
 
-## 待你在真实 Pi 上完成的收尾
+## Darwin-skill 进化
 
-1. 首次 `agent_settled` 触发抽取时，确认 bridge 能复用 Pi 模型返回非空文本（`callPiModel()` 签名已按本地 pi-ai 类型核对）；
-2. 首次 `agent_settled` 后确认 `~/.pi/agent/skills/` 出现带 `.autoskill-managed.json` 的技能目录；
-3. Pi 里用 `/skill:<name>` 验证命中与加载；观察 `/autoskill_extract_now` 的输出与账本去重。
+`autoskill/evolution/SKILL.md` 提供了基于 darwin-skill 的 9 维度技能优化能力。
+Agent 可以在创建技能后手动触发进化，或通过 `/autoskill_evolve` 命令检查需要进化的技能。
+
+进化是可选的增强步骤——创建技能本身已经是高质量抽取（agent 有完整上下文）。
