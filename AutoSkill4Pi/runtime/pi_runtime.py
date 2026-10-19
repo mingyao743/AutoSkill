@@ -327,6 +327,139 @@ def _cmd_evolution_check(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_create_skill(args: argparse.Namespace) -> int:
+    """Create a new skill from agent-provided JSON payload."""
+    payload = json.loads(args.payload)
+    sdk = build_sdk()
+    uid = user_id()
+
+    from autoskill.management.extraction import SkillCandidate
+
+    candidate = SkillCandidate(
+        name=payload["name"],
+        description=payload.get("description", ""),
+        instructions=payload.get("prompt", ""),
+        triggers=payload.get("triggers", []),
+        tags=payload.get("tags", []),
+        examples=[],
+        confidence=0.8,
+    )
+
+    updated_skills = sdk.maintainer.apply([candidate], user_id=uid, metadata={
+        "channel": "agent_create_skill",
+    })
+
+    skill = updated_skills[0] if updated_skills else None
+    skill_id = str(getattr(skill, "id", "") or "")
+    version = str(getattr(skill, "version", "") or "0.1.0")
+
+    # Mirror to Pi skills dir
+    mirror = mirror_user_skills(sdk, user_id=uid, pi_skills_dir=pi_skills_dir())
+
+    # Darwin-skill evolution is available as a skill (autoskill/evolution/SKILL.md)
+    # and can be triggered by the agent or via /autoskill_evolve command.
+    # For now, creation itself is the primary action; evolution is a follow-up step.
+    evolution_applied = False
+
+    result = {
+        "skill_id": skill_id,
+        "name": payload["name"],
+        "version": version,
+        "evolution_applied": evolution_applied,
+        "mirrored": int(mirror.get("count", 0) or 0),
+    }
+    print(json.dumps(result, ensure_ascii=False))
+    return 0
+
+
+def _cmd_update_skill(args: argparse.Namespace) -> int:
+    """Update an existing skill from agent-provided JSON payload."""
+    payload = json.loads(args.payload)
+    sdk = build_sdk()
+    uid = user_id()
+    skill_id = payload.get("skill_id", "")
+
+    existing = sdk.store.get(skill_id)
+    if not existing:
+        print(json.dumps({"error": f"Skill not found: {skill_id}"}, ensure_ascii=False))
+        return 1
+
+    # Build updated fields
+    updates = {}
+    for field in ("name", "description", "prompt", "triggers", "tags"):
+        if field in payload and payload[field] is not None:
+            if field == "prompt":
+                updates["instructions"] = payload[field]
+            else:
+                updates[field] = payload[field]
+
+    if not updates:
+        print(json.dumps({"error": "No fields to update"}, ensure_ascii=False))
+        return 1
+
+    # Update via maintainer (handles versioning)
+    from autoskill.management.extraction import SkillCandidate
+
+    candidate = SkillCandidate(
+        name=updates.get("name", existing.name),
+        description=updates.get("description", existing.description),
+        instructions=updates.get("instructions", existing.instructions),
+        triggers=updates.get("triggers", existing.triggers),
+        tags=updates.get("tags", existing.tags),
+        examples=[],
+        confidence=0.8,
+    )
+
+    updated_skills = sdk.maintainer.apply([candidate], user_id=uid, metadata={
+        "channel": "agent_update_skill",
+        "previous_skill_id": skill_id,
+    })
+
+    # Mirror
+    mirror = mirror_user_skills(sdk, user_id=uid, pi_skills_dir=pi_skills_dir())
+
+    result_skill = updated_skills[0] if updated_skills else existing
+    result = {
+        "skill_id": str(getattr(result_skill, "id", "") or skill_id),
+        "name": getattr(result_skill, "name", ""),
+        "version": str(getattr(result_skill, "version", "") or "0.1.0"),
+        "mirrored": int(mirror.get("count", 0) or 0),
+    }
+    print(json.dumps(result, ensure_ascii=False))
+    return 0
+
+
+def _cmd_list_skills(args: argparse.Namespace) -> int:
+    """List all skills for the current user."""
+    sdk = build_sdk()
+    uid = user_id()
+    skills = sdk.list(user_id=uid)
+
+    fmt = getattr(args, "format", "text") or "text"
+
+    if fmt == "json":
+        items = []
+        for s in skills:
+            items.append({
+                "id": str(getattr(s, "id", "") or ""),
+                "name": str(getattr(s, "name", "") or ""),
+                "description": str(getattr(s, "description", "") or ""),
+                "version": str(getattr(s, "version", "") or "0.1.0"),
+            })
+        print(json.dumps(items, ensure_ascii=False))
+    else:
+        if not skills:
+            print("(no skills)")
+        else:
+            for s in skills:
+                sid = str(getattr(s, "id", "") or "")
+                name = str(getattr(s, "name", "") or "")
+                ver = str(getattr(s, "version", "") or "0.1.0")
+                desc = str(getattr(s, "description", "") or "")
+                print(f"- [{sid}] {name} (v{ver}): {desc}")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="AutoSkill4Pi runtime")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -348,6 +481,18 @@ def build_parser() -> argparse.ArgumentParser:
 
     pe = sub.add_parser("evolution-check", help="Check which skills need evolution")
     pe.set_defaults(func=_cmd_evolution_check)
+
+    pc = sub.add_parser("create-skill", help="Create a new skill from JSON payload")
+    pc.add_argument("--payload", required=True, help="JSON with name/description/prompt/triggers/tags")
+    pc.set_defaults(func=_cmd_create_skill)
+
+    pu = sub.add_parser("update-skill", help="Update an existing skill from JSON payload")
+    pu.add_argument("--payload", required=True, help="JSON with skill_id + fields to update")
+    pu.set_defaults(func=_cmd_update_skill)
+
+    pl = sub.add_parser("list-skills", help="List all skills")
+    pl.add_argument("--format", choices=["text", "json"], default="text")
+    pl.set_defaults(func=_cmd_list_skills)
     return p
 
 

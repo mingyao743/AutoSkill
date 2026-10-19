@@ -1,303 +1,330 @@
 /**
- * AutoSkill4Pi — Pi Coding Agent extension (运行形态 A: Extension adapter)
+ * AutoSkill4Pi — Pi Coding Agent extension (agent-driven skill learning)
  *
- * 作用:
- *   1. 会话收口后(agent_settled)触发 AutoSkill 从 Pi 会话轨迹中抽取/演进技能;
- *   2. 复用 Pi 当前模型做抽取:extension 在本进程内起一个 localhost 的
- *      OpenAI 兼容 /v1/chat/completions bridge,内部转调 Pi 的模型运行时
- *      (ctx.modelRegistry.streamSimple),Python 侧用 provider=generic 指向它;
- *   3. 维护完成后把技能镜像到用户级 ~/.pi/agent/skills(由 Python 侧负责写盘);
- *   4. 提供 /autoskill_* 命令与 autoskill_search 工具用于运维与主动检索。
+ * Architecture:
+ *   1. before_agent_start → inject current skill summary + extraction guidance
+ *      into system prompt so the agent knows its skills and when to create new ones.
+ *   2. Agent decides when to extract/evolve skills by calling tools:
+ *      - autoskill_create: create a new skill (triggers darwin-skill evolution)
+ *      - autoskill_update: update an existing skill
+ *      - autoskill_list:   list current skills
+ *      - autoskill_search: search skills by query (read-only)
+ *   3. Tools spawn Python runtime for SkillBank CRUD + mirror.
+ *   4. No bridge needed — agent IS the extraction engine.
  *
- * 生命周期遵循 Pi 约定:
- *   - 不在 factory 里起 socket;bridge 从 session_start 启动;
- *   - session_shutdown 幂等关闭 server 与子进程。
- *
- * 关于模型复用 API(已按本地安装的 @earendil-works/pi-ai / pi-coding-agent 类型核对):
- *   Pi 的 ModelRegistry 暴露 streamSimple(model, context, options?) -> AssistantMessageEventStream,
- *   并自带 request-time 鉴权;getApiKeyAndHeaders(model) -> Promise<ResolvedRequestAuth> 用于显式
- *   解析 key/header。callPiModel() 即据此实现,复用 ctx.model + ctx.modelRegistry,无需 import pi-ai。
- *   备选:不启用 bridge,直接设置 AUTOSKILL_PI_LLM_BASE_URL 为任意 OpenAI 兼容端点,
- *   此时 extension 尊重用户配置、不再注入内置 bridge(见 applyLlmBridgeEnv)。
+ * Lifecycle:
+ *   - session_start:      initialize (optional legacy process-dir for migration)
+ *   - before_agent_start: inject skill context into system prompt
+ *   - session_shutdown:   cleanup
  */
 
-import http from "node:http";
 import { spawn } from "node:child_process";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 
 const AUTOSKILL_HOME = process.env["AUTOSKILL_PI_HOME"] || "~/.pi/autoskill";
-const PI_SESSIONS_ROOT = process.env["AUTOSKILL_PI_SESSIONS_DIR"] || "~/.pi/agent/sessions";
-const REPO_DIR = process.env["AUTOSKILL_PI_REPO_DIR"] || ""; // AutoSkill 仓库 checkout 根
+const REPO_DIR = process.env["AUTOSKILL_PI_REPO_DIR"] || "";
 const PYTHON = process.env["AUTOSKILL_PI_PYTHON"] || "python3";
-const BRIDGE_HOST = "127.0.0.1";
 
-let bridgeServer: http.Server | null = null;
-let bridgePort = 0;
-let liveExtractCounter = 0;
-const LIVE_EVERY_TURNS = Number(process.env["AUTOSKILL_PI_LIVE_EXTRACT_EVERY_TURNS"] || "0"); // 0=off
+// ---- System prompt injection: skill summary + extraction guidance ----
 
-// ---- LLM 路由策略:默认走内置 bridge(复用 Pi 当前模型),用户自配外部端点时尊重其配置 ----
-function userConfiguredExternalLlm(): boolean {
-  // 只要用户在环境里显式配了 AUTOSKILL_PI_LLM_BASE_URL,就视为“自配外部 OpenAI 兼容端点”。
-  // bridge 的 URL 是每个进程随机端口、不会出现在父进程 env 里,因此不会误判。
-  return Boolean((process.env["AUTOSKILL_PI_LLM_BASE_URL"] || "").trim());
-}
+const SKILL_LEARNING_GUIDANCE = `
+### Skill Learning (AutoSkill)
 
-function applyLlmBridgeEnv(env: NodeJS.ProcessEnv): void {
-  if (userConfiguredExternalLlm()) {
-    // 用户已自配外部端点:尊重其 AUTOSKILL_PI_LLM_PROVIDER/BASE_URL/API_KEY/MODEL
-    // (这些已由 ...process.env 继承进来),不覆盖、不注入 bridge。
-    return;
+You have the ability to learn and reuse skills across sessions.
+
+**When to create a skill (call autoskill_create):**
+- User corrects your approach ("no, it should be...", "wrong, change to...")
+- User establishes a reusable rule ("from now on, always...", "the format should be...")
+- User expresses a clear preference ("don't use...", "prefer...")
+- You discover a reusable pattern that would be hard to re-derive
+
+**Skill naming rules:**
+- name: ALWAYS English kebab-case (e.g., "code-review-checklist", "formal-report-style")
+- description/prompt/triggers/tags: match user's language
+
+**Skill prompt structure:**
+- # Goal (required): what this skill achieves
+- # Constraints & Style (required): must-do and must-not-do rules
+- # Workflow (optional): only for explicit multi-step operations
+
+**When to update a skill (call autoskill_update):**
+- An existing skill is not working well for the current task
+- User corrects something covered by an existing skill
+- Call autoskill_update with the skill_id and fields to change
+
+**When to search skills (call autoskill_search):**
+- Before starting a task, check if you have a relevant skill
+- When user references a previous pattern or rule
+`;
+
+function buildSkillInjectionPrompt(skillsJson: string): string {
+  let skills: Array<{ name: string; description: string; version: string }> = [];
+  try {
+    skills = JSON.parse(skillsJson);
+  } catch {
+    // If we can't parse, just return the guidance without skill list
   }
-  // 默认:把 AutoSkill 抽取 LLM 路由到内置 bridge,复用 Pi 当前模型 + key,无需单独配凭据。
-  env["AUTOSKILL_PI_LLM_PROVIDER"] = "generic";
-  env["AUTOSKILL_PI_LLM_BASE_URL"] = `http://${BRIDGE_HOST}:${bridgePort}/v1`;
-  if (!env["AUTOSKILL_PI_LLM_MODEL"]) env["AUTOSKILL_PI_LLM_MODEL"] = "pi-current-model";
+
+  let skillList = "";
+  if (skills.length > 0) {
+    skillList = "\n**Your current skills:**\n";
+    for (const s of skills) {
+      skillList += `- ${s.name} (v${s.version}): ${s.description}\n`;
+    }
+  } else {
+    skillList = "\nYou have no skills yet. Create your first one when you learn something reusable.\n";
+  }
+
+  return SKILL_LEARNING_GUIDANCE + skillList;
 }
 
-// ---- 触发一次后台处理:让 Python 扫 sessions 目录,账本幂等去重 ----
-function runPiRuntime(ctx: ExtensionContext, cmd: string[], extraEnv: Record<string, string>) {
-  const env: NodeJS.ProcessEnv = {
-    ...process.env,
-    AUTOSKILL_PI_SESSIONS_DIR: PI_SESSIONS_ROOT,
-  };
-  applyLlmBridgeEnv(env);
-  Object.assign(env, extraEnv);
+// ---- Python runtime invocation ----
+
+function runPythonCapture(cmd: string[], extraEnv: Record<string, string> = {}): Promise<string> {
+  return new Promise((resolve, reject) => {
+    if (!REPO_DIR) return reject(new Error("AUTOSKILL_PI_REPO_DIR not set"));
+    const env: NodeJS.ProcessEnv = {
+      ...process.env,
+      ...extraEnv,
+    };
+    const child = spawn(PYTHON, ["-m", "AutoSkill4Pi.runtime.pi_runtime", ...cmd], {
+      cwd: REPO_DIR,
+      env,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let out = "";
+    let err = "";
+    child.stdout.on("data", (b) => (out += b.toString()));
+    child.stderr.on("data", (b) => (err += b.toString()));
+    child.on("error", reject);
+    child.on("close", (code) => {
+      if (code === 0) resolve(out.trim());
+      else reject(new Error(`exit ${code}: ${err.slice(-500)}`));
+    });
+  });
+}
+
+function runPiRuntimeAsync(ctx: ExtensionContext, cmd: string[]) {
   if (!REPO_DIR) {
-    ctx.ui.notify("AutoSkill: AUTOSKILL_PI_REPO_DIR 未设置,跳过本次抽取", "warn");
+    ctx.ui.notify("AutoSkill: AUTOSKILL_PI_REPO_DIR not set", "warn");
     return;
   }
   const child = spawn(PYTHON, ["-m", "AutoSkill4Pi.runtime.pi_runtime", ...cmd], {
     cwd: REPO_DIR,
-    env,
+    env: process.env,
     stdio: ["ignore", "pipe", "pipe"],
   });
   let out = "";
   child.stdout.on("data", (b) => (out += b.toString()));
-  child.stderr.on("data", (b) => out += b.toString());
+  child.stderr.on("data", (b) => (out += b.toString()));
   child.on("close", (code) => {
-    if (code === 0) {
-      try {
-        const summary = JSON.parse(out.trim().split("\n").pop() || "{}");
-        const n = Number(summary.upserted || 0);
-        if (n > 0) ctx.ui.notify(`AutoSkill: 演进/新增 ${n} 个技能,已镜像到 ~/.pi/agent/skills`, "info");
-      } catch {
-        /* non-fatal */
-      }
-    } else {
-      ctx.ui.notify(`AutoSkill runtime 失败 (exit ${code}): ${out.slice(-300)}`, "warn");
+    if (code !== 0) {
+      ctx.ui.notify(`AutoSkill runtime failed (exit ${code}): ${out.slice(-300)}`, "warn");
     }
   });
-  child.on("error", (e) => ctx.ui.notify(`AutoSkill runtime 启动失败: ${e.message}`, "warn"));
-}
-
-// ---- Pi 模型 bridge:OpenAI 兼容 /v1/chat/completions -> Pi 当前模型 ----
-async function callPiModel(ctx: ExtensionContext, body: any): Promise<string> {
-  // 复用 Pi 当前选定的模型 + provider 做抽取。
-  // 真实 Pi API: ctx.modelRegistry.streamSimple(model, context, options?) -> AssistantMessageEventStream
-  //   - model   : ctx.model(当前会话选中的模型,可能为 undefined)
-  //   - context : { systemPrompt?, messages: Message[], tools? }(pi-ai Context)
-  //   - options : { signal?, apiKey?, headers? }(streamSimple 内部自带 request-time 鉴权)
-  //   - 返回事件流;text_delta 事件带 `delta: string`。
-  const model: any = (ctx as any).model;
-  if (!model) {
-    throw new Error("AutoSkill: Pi 尚未选定模型(ctx.model 为空),无法复用 Pi 模型做抽取。");
-  }
-  const registry: any = (ctx as any).modelRegistry;
-  if (!registry || typeof registry.streamSimple !== "function") {
-    throw new Error("AutoSkill: ctx.modelRegistry.streamSimple 不可用(请核对当前 Pi 版本)。");
-  }
-
-  // 把 OpenAI chat/completions body 转成 pi-ai Context(system 抽为 systemPrompt,其余按 user/assistant)。
-  const messages = Array.isArray(body?.messages) ? body.messages : [];
-  const toText = (c: any): string =>
-    typeof c === "string" ? c : Array.isArray(c) ? c.map((p: any) => p?.text ?? "").join("") : "";
-  const systemMsg = messages.find((m: any) => m?.role === "system");
-  const piMessages = messages
-    .filter((m: any) => m?.role !== "system")
-    .map((m: any) => ({
-      role: m?.role === "assistant" ? "assistant" : "user",
-      content: toText(m?.content),
-    }));
-  const context: any = {
-    systemPrompt:
-      (systemMsg ? toText(systemMsg.content) : "") ||
-      "你是经验挖掘引擎(LLM 模式)。根据参考资料输出结果。",
-    messages: piMessages,
-  };
-
-  // streamSimple 内部会做 request-time 鉴权;这里显式解析一次,缺凭据时给出明确错误,
-  // 并把解析出的 apiKey/header 透传下去(如 OAuth header)。getApiKeyAndHeaders 返回 Promise。
-  const options: any = { signal: (ctx as any).signal };
-  if (typeof registry.getApiKeyAndHeaders === "function") {
-    const auth: any = await registry.getApiKeyAndHeaders(model);
-    if (auth && auth.ok === false) {
-      throw new Error(`AutoSkill: Pi 模型鉴权失败: ${auth.error}`);
-    }
-    if (auth?.apiKey) options.apiKey = auth.apiKey;
-    if (auth?.headers) options.headers = auth.headers;
-  }
-
-  // 消费事件流:累加 text_delta.delta 作为完整文本。
-  const stream = registry.streamSimple(model, context, options) as AsyncIterable<any>;
-  let collected = "";
-  for await (const ev of stream) {
-    if (ev?.type === "text_delta" && typeof ev.delta === "string") collected += ev.delta;
-  }
-  const out = collected.trim();
-  if (!out) throw new Error("AutoSkill: Pi 模型返回空补全。");
-  return out;
-}
-
-function startBridge(ctx: ExtensionContext) {
-  if (bridgeServer) return;
-  bridgeServer = http.createServer((req, res) => {
-    if (req.method === "GET" && req.url === "/health") {
-      res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ ok: true }));
-      return;
-    }
-    if (req.method === "POST" && /\/v1\/chat\/completions$/.test(req.url || "")) {
-      let raw = "";
-      req.on("data", (c) => (raw += c));
-      req.on("end", async () => {
-        try {
-          const body = JSON.parse(raw || "{}");
-          const text = await callPiModel(ctx, body);
-          const resp = {
-            id: "chatcmpl-autoskill",
-            object: "chat.completion",
-            model: body.model || "pi-current-model",
-            choices: [{ index: 0, message: { role: "assistant", content: text }, finish_reason: "stop" }],
-          };
-          res.writeHead(200, { "Content-Type": "application/json" });
-          res.end(JSON.stringify(resp));
-        } catch (e: any) {
-          res.writeHead(502, { "Content-Type": "application/json" });
-          res.end(JSON.stringify({ error: { message: String(e?.message || e) } }));
-        }
-      });
-      return;
-    }
-    res.writeHead(404);
-    res.end();
-  });
-  bridgeServer.listen(0, BRIDGE_HOST, () => {
-    const addr = bridgeServer?.address();
-    if (addr && typeof addr === "object") bridgePort = addr.port;
-    ctx.ui.notify(`AutoSkill: Pi 模型 bridge 已启动 http://${BRIDGE_HOST}:${bridgePort}/v1`, "info");
-  });
-}
-
-function stopBridge() {
-  if (bridgeServer) {
-    try { bridgeServer.close(); } catch { /* noop */ }
-    bridgeServer = null;
-    bridgePort = 0;
-  }
-}
-
-async function checkAndTriggerEvolution(ctx: ExtensionContext): Promise<void> {
-  if (!REPO_DIR) return;
-  try {
-    const out = await runPythonCapture(ctx, ["evolution-check"]);
-    const parsed = JSON.parse(out);
-    const candidates: Array<{ skill_id: string; skill_name: string; provenance_count: number }> =
-      parsed.evolution_candidates || [];
-    if (candidates.length > 0) {
-      const skillList = candidates.map((c) => `${c.skill_name} (${c.provenance_count} records)`).join(", ");
-      console.log(`[autoskill] Evolution needed for: ${skillList}`);
-      // Evolution skill will be picked up by the agent's native skill loader
-      // on the next session. The evolution SKILL.md is mirrored alongside other skills.
-    }
-  } catch {
-    // Non-critical: evolution check failure should not affect main flow
-  }
+  child.on("error", (e) => ctx.ui.notify(`AutoSkill runtime spawn failed: ${e.message}`, "warn"));
 }
 
 export default function (pi: ExtensionAPI) {
+  // ---- Lifecycle hooks ----
+
   pi.on("session_start", async (_event, ctx) => {
-    // 仅当用户没有自配外部 LLM 端点时才起 bridge(避免多余监听)。
-    if (!userConfiguredExternalLlm()) startBridge(ctx);
+    // Optional: run a legacy migration if needed (process any unprocessed sessions)
+    // This is a one-time thing; after migration, agent-driven learning takes over.
   });
 
-  pi.on("session_shutdown", async () => {
-    stopBridge();
-  });
-
-  // 会话最终收口:通知-only,适合触发一次完整抽取/维护。
-  pi.on("agent_settled", async (_event, ctx) => {
-    liveExtractCounter = 0;
-    runPiRuntime(ctx, ["process-dir", "--dir", PI_SESSIONS_ROOT], {});
-    // 异步检查是否需要进化（不阻塞主流程）
-    checkAndTriggerEvolution(ctx);
-  });
-
-  // 可选:活跃会话每 N turn 做一次 checkpoint 抽取(默认关闭)
-  pi.on("turn_end", async (_event, ctx) => {
-    if (LIVE_EVERY_TURNS <= 0) return;
-    liveExtractCounter += 1;
-    if (liveExtractCounter >= LIVE_EVERY_TURNS) {
-      liveExtractCounter = 0;
-      runPiRuntime(ctx, ["process-dir", "--dir", PI_SESSIONS_ROOT], { AUTOSKILL_PI_LIVE: "1" });
+  pi.on("before_agent_start", async (_event, ctx) => {
+    // Inject skill summary + extraction guidance into system prompt
+    try {
+      const skillsJson = await runPythonCapture(["list-skills", "--format", "json"]);
+      const injection = buildSkillInjectionPrompt(skillsJson);
+      // Return system prompt addition that Pi will merge
+      return { systemPrompt: injection };
+    } catch {
+      // If we can't read skills, just inject the guidance without skill list
+      return { systemPrompt: SKILL_LEARNING_GUIDANCE + "\n(Could not load skill list)\n" };
     }
   });
 
-  pi.registerCommand("autoskill_extract_now", {
-    description: "立即触发一次 AutoSkill 技能抽取/维护(扫描 Pi 会话)",
+  pi.on("session_shutdown", async () => {
+    // Nothing to clean up (no bridge)
+  });
+
+  // ---- Slash commands ----
+
+  pi.registerCommand("autoskill_list", {
+    description: "List all AutoSkill skills",
     handler: async (_args, ctx) => {
-      runPiRuntime(ctx, ["process-dir", "--dir", PI_SESSIONS_ROOT], {});
+      try {
+        const out = await runPythonCapture(["list-skills", "--format", "text"]);
+        ctx.ui.notify(out || "(no skills)", "info");
+      } catch (e: any) {
+        ctx.ui.notify(`AutoSkill: ${e.message}`, "warn");
+      }
     },
   });
 
   pi.registerCommand("autoskill_sync", {
-    description: "重新把 SkillBank 镜像到 ~/.pi/agent/skills",
+    description: "Re-mirror SkillBank to ~/.pi/agent/skills",
     handler: async (_args, ctx) => {
-      runPiRuntime(ctx, ["mirror"], {});
+      runPiRuntimeAsync(ctx, ["mirror"]);
+      ctx.ui.notify("AutoSkill: mirroring skills...", "info");
     },
   });
 
-  pi.registerCommand("autoskill_evolve", {
-    description: "检查并触发 AutoSkill 技能进化（基于 darwin-skill 9 维评估）",
-    handler: async (_args, ctx) => {
-      await checkAndTriggerEvolution(ctx);
+  // ---- Tools ----
+
+  pi.registerTool({
+    name: "autoskill_create",
+    description: "Create a new reusable skill from what you just learned. Use when the user corrects you, establishes a rule, or expresses a preference that should be reused.",
+    parameters: {
+      type: "object",
+      properties: {
+        name: {
+          type: "string",
+          description: "English kebab-case name (e.g., 'code-review-checklist')",
+        },
+        description: {
+          type: "string",
+          description: "1-2 sentences: what this skill does and when to use it",
+        },
+        prompt: {
+          type: "string",
+          description: "Skill prompt with # Goal, # Constraints & Style, optional # Workflow",
+        },
+        triggers: {
+          type: "array",
+          items: { type: "string" },
+          description: "3-5 intent phrases that trigger this skill",
+        },
+        tags: {
+          type: "array",
+          items: { type: "string" },
+          description: "1-6 keywords",
+        },
+      },
+      required: ["name", "description", "prompt"],
+    },
+    annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
+    execute: async (args: any, ctx: ExtensionContext) => {
+      const payload = JSON.stringify({
+        name: args.name,
+        description: args.description,
+        prompt: args.prompt,
+        triggers: args.triggers || [],
+        tags: args.tags || [],
+      });
+      try {
+        const out = await runPythonCapture(["create-skill", "--payload", payload]);
+        const result = JSON.parse(out);
+        const skillId = result.skill_id || "";
+        const version = result.version || "0.1.0";
+        const evolved = result.evolution_applied ? " (evolved by darwin-skill)" : "";
+        return {
+          content: [{ type: "text", text: `Skill created: ${args.name} (v${version})${evolved}\nID: ${skillId}` }],
+          details: undefined,
+        };
+      } catch (e: any) {
+        return {
+          content: [{ type: "text", text: `Failed to create skill: ${e.message}` }],
+          details: undefined,
+          isError: true,
+        };
+      }
+    },
+  });
+
+  pi.registerTool({
+    name: "autoskill_update",
+    description: "Update an existing skill. Use when a skill is not working well or user corrects something covered by it.",
+    parameters: {
+      type: "object",
+      properties: {
+        skill_id: { type: "string", description: "ID of the skill to update" },
+        name: { type: "string", description: "New name (optional)" },
+        description: { type: "string", description: "New description (optional)" },
+        prompt: { type: "string", description: "New prompt (optional)" },
+        triggers: { type: "array", items: { type: "string" }, description: "New triggers (optional)" },
+        tags: { type: "array", items: { type: "string" }, description: "New tags (optional)" },
+      },
+      required: ["skill_id"],
+    },
+    annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
+    execute: async (args: any, ctx: ExtensionContext) => {
+      const payload = JSON.stringify({
+        skill_id: args.skill_id,
+        name: args.name,
+        description: args.description,
+        prompt: args.prompt,
+        triggers: args.triggers,
+        tags: args.tags,
+      });
+      try {
+        const out = await runPythonCapture(["update-skill", "--payload", payload]);
+        const result = JSON.parse(out);
+        const version = result.version || "0.1.0";
+        return {
+          content: [{ type: "text", text: `Skill updated: ${result.name} (v${version})` }],
+          details: undefined,
+        };
+      } catch (e: any) {
+        return {
+          content: [{ type: "text", text: `Failed to update skill: ${e.message}` }],
+          details: undefined,
+          isError: true,
+        };
+      }
+    },
+  });
+
+  pi.registerTool({
+    name: "autoskill_list",
+    description: "List all your current skills with their IDs, names, and descriptions.",
+    parameters: {
+      type: "object",
+      properties: {},
+    },
+    annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
+    execute: async (_args: any, ctx: ExtensionContext) => {
+      try {
+        const out = await runPythonCapture(["list-skills", "--format", "text"]);
+        return { content: [{ type: "text", text: out || "(no skills)" }], details: undefined };
+      } catch (e: any) {
+        return {
+          content: [{ type: "text", text: `Failed to list skills: ${e.message}` }],
+          details: undefined,
+          isError: true,
+        };
+      }
     },
   });
 
   pi.registerTool({
     name: "autoskill_search",
-    description: "在 AutoSkill 技能库中检索与当前任务相关的可复用技能(只读)。",
+    description: "Search your skills by keyword. Use before starting a task to check if you have a relevant skill.",
     parameters: {
       type: "object",
-      properties: { query: { type: "string", description: "检索查询" } },
+      properties: {
+        query: { type: "string", description: "Search query" },
+      },
       required: ["query"],
     },
     annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
     execute: async (args: any, ctx: ExtensionContext) => {
       const query = String(args?.query || "").trim();
-      if (!query) return { content: [{ type: "text", text: "query 不能为空" }], details: undefined, isError: true };
-      // 走 Python:mirror 命令之外这里用一个轻量 search 输出。为保持简单,
-      // 复用 pi_runtime 的 search 能力通过 SDK;若未接入则提示用 /autoskill_sync。
-      const out = await runPythonCapture(ctx, ["search", "--query", query]).catch((e) => String(e));
-      return { content: [{ type: "text", text: out || "(no matching skills)" }], details: undefined };
+      if (!query) {
+        return { content: [{ type: "text", text: "query cannot be empty" }], details: undefined, isError: true };
+      }
+      try {
+        const out = await runPythonCapture(["search", "--query", query]);
+        return { content: [{ type: "text", text: out || "(no matching skills)" }], details: undefined };
+      } catch (e: any) {
+        return {
+          content: [{ type: "text", text: `Search failed: ${e.message}` }],
+          details: undefined,
+          isError: true,
+        };
+      }
     },
-  });
-}
-
-// 同步捕获 Python 子进程输出(用于工具检索)
-function runPythonCapture(ctx: ExtensionContext, cmd: string[]): Promise<string> {
-  return new Promise((resolve, reject) => {
-    if (!REPO_DIR) return reject(new Error("AUTOSKILL_PI_REPO_DIR 未设置"));
-    const env: NodeJS.ProcessEnv = {
-      ...process.env,
-      AUTOSKILL_PI_SESSIONS_DIR: PI_SESSIONS_ROOT,
-    };
-    applyLlmBridgeEnv(env);
-    const child = spawn(PYTHON, ["-m", "AutoSkill4Pi.runtime.pi_runtime", ...cmd], { cwd: REPO_DIR, env });
-    let out = "";
-    child.stdout.on("data", (b) => (out += b.toString()));
-    child.stderr.on("data", (b) => (out += b.toString()));
-    child.on("error", reject);
-    child.on("close", () => resolve(out));
   });
 }
