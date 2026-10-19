@@ -2,190 +2,171 @@
 
 让 [Pi Coding Agent](https://pi.dev/) 在使用中自主学会新技能。
 
-AutoSkill4Pi 是 [AutoSkill](../README.zh-CN.md)（经验驱动终身学习 ELL）到 Pi 的集成。
-Agent 自己决定何时抽取技能、何时更新技能——不需要后台 pipeline，不需要 OpenAI 兼容桥。
+**极简架构**：纯文件系统，零 Python，零 tool，零 bridge。Agent 直接读写 SKILL.md。
 
-## 核心架构
-
-```
-Pi 进程
-  └─ extension: autoskill-pi.ts
-       ├─ before_agent_start → 注入技能摘要 + 抽取引导到 system prompt
-       ├─ autoskill_create   → agent 主动创建技能（写入 SkillBank + mirror）
-       ├─ autoskill_update   → agent 主动更新技能（版本递增）
-       ├─ autoskill_list     → agent 查看技能列表
-       └─ autoskill_search   → agent 按关键词检索技能
-                                  │
-                                  ▼
-        AutoSkill4Pi/runtime (Python, 纯存储层)
-          ├─ SkillBank CRUD      技能增删改查 + 版本管理
-          ├─ pi_skill_mirror     SkillBank → ~/.pi/agent/skills（带托管标记）
-          └─ pi_session_adapter  Pi JSONL → 轨迹记录（兼容离线批处理）
-```
-
-**设计原则**：
-- **Agent 是抽取引擎**：agent 有完整对话上下文，比后台 pipeline 更懂"该抽什么"；
-- **SkillBank 是真源**：`~/.pi/agent/skills` 只是镜像，非真源；
-- **镜像安全**：只覆盖 AutoSkill 创建的目录（`.autoskill-managed.json` 标记），同名人工技能用 `<slug>-autoskill` 后缀并存，绝不覆盖；
-- **无桥架构**：不再需要 OpenAI 兼容 bridge，agent 自己就是 LLM。
-
-## 工作流程
+## 架构
 
 ```
-1. 会话开始
-   before_agent_start → agent 看到当前技能列表 + 抽取引导
+~/.pi/agent/skills/          ← 唯一的数据存储
+├── code-review-checklist/
+│   └── SKILL.md             ← agent 用 Pi 原生 file tool 读写
+├── formal-report-style/
+│   └── SKILL.md
+└── darwin-skill/            ← 进化技能（元技能）
+    └── SKILL.md
 
-2. 会话进行中
-   agent 发现用户纠正/建立规则 → 调用 autoskill_create
-   → Python 写入 SkillBank → 自动 mirror 到 ~/.pi/agent/skills
+Pi extension (autoskill-pi.ts, ~80 行):
+  before_agent_start → 读目录 → 注入技能摘要 + 引导到 system prompt
 
-3. 后续会话
-   agent 通过 before_agent_start 看到新技能 → 直接复用
-
-4. 技能不好用？
-   agent 调用 autoskill_update → 版本递增（v0.1.0 → v0.1.1）
+Agent:
+  创建技能 → write SKILL.md
+  更新技能 → edit SKILL.md
+  进化技能 → 读 darwin-skill + 当前技能 → 改写 SKILL.md
 ```
+
+**没有后台 pipeline，没有 Python 子进程，没有 OpenAI 兼容桥。**
+Extension 只做一件事：每次 agent 回复前，告诉它"你有哪些技能，何时创建/更新/进化"。
 
 ## 安装
 
-前置：Python 3.10+、已 `pip install -e .` 安装 autoskill、已安装可运行的 Pi。
-
 ```bash
-cd /path/to/AutoSkill
-python3 -m pip install -e .
-python3 AutoSkill4Pi/install.py --repo-dir "$(pwd)"
+# 1. 复制 extension 到 Pi
+mkdir -p ~/.pi/agent/extensions/autoskill
+cp AutoSkill4Pi/extension/autoskill-pi.ts ~/.pi/agent/extensions/autoskill/
+cp AutoSkill4Pi/extension/package.json ~/.pi/agent/extensions/autoskill/
+
+# 2. 创建技能目录
+mkdir -p ~/.pi/agent/skills
 ```
 
-安装器会：
-- 把 extension 复制到 `~/.pi/agent/extensions/autoskill/`
-- 创建 `~/.pi/autoskill/SkillBank` 与 `~/.pi/agent/skills`
-
-启动 Pi 前设置环境变量：
+可选环境变量：
 
 ```bash
-export AUTOSKILL_PI_REPO_DIR=/abs/path/to/AutoSkill
-export AUTOSKILL_PI_PYTHON=python3
+export AUTOSKILL_PI_SKILLS_DIR=~/.pi/agent/skills   # 默认值
 ```
 
-## Agent 工具
+## 工作原理
 
-### autoskill_create
+### 1. 会话开始
 
-创建新技能。当用户纠正你的做法、建立可复用规则、或表达明确偏好时调用。
-
-参数：
-- `name`（必填）：英文 kebab-case，如 `code-review-checklist`
-- `description`（必填）：1-2 句话说明做什么、何时用
-- `prompt`（必填）：技能 prompt，包含 `# Goal` + `# Constraints & Style`
-- `triggers`：3-5 个触发意图短语
-- `tags`：1-6 个关键词
-
-### autoskill_update
-
-更新已有技能。当技能不好用或用户再次纠正了技能覆盖的场景时调用。
-
-参数：
-- `skill_id`（必填）：要更新的技能 ID
-- `name` / `description` / `prompt` / `triggers` / `tags`：可选更新字段
-
-### autoskill_list
-
-列出所有技能，返回 ID、名称、版本、描述。
-
-### autoskill_search
-
-按关键词检索技能。开始任务前检查是否有相关技能。
-
-参数：
-- `query`（必填）：检索关键词
-
-## System Prompt 注入
-
-`before_agent_start` 会自动注入以下内容到 system prompt：
+Extension 的 `before_agent_start` 读取 `~/.pi/agent/skills/*/SKILL.md`，注入 system prompt：
 
 ```
 ### Skill Learning (AutoSkill)
 
-You have the ability to learn and reuse skills across sessions.
-
-**When to create a skill (call autoskill_create):**
-- User corrects your approach ("no, it should be...", "wrong, change to...")
-- User establishes a reusable rule ("from now on, always...")
-- User expresses a clear preference ("don't use...", "prefer...")
-
-**Skill naming rules:**
-- name: ALWAYS English kebab-case
-- description/prompt/triggers/tags: match user's language
-
 **Your current skills:**
 - code-review-checklist (v0.2.0): Checklist for reviewing code changes
 - formal-report-style (v0.1.0): Write formal reports in Chinese
+
+**When to create a skill:**
+- User corrects your approach
+- User establishes a reusable rule
+→ Create directory and write SKILL.md
+
+**SKILL.md format:**
+---
+name: english-kebab-case-name
+description: 1-2 sentences
+version: 0.1.0
+---
+# Goal ...
+# Constraints & Style ...
 ```
 
-Agent 据此知道：有哪些技能、何时创建新技能、命名规范。
+### 2. Agent 创建技能
 
-## 配置项（环境变量）
+用户说："以后写代码注释都用中文"
 
-| 变量 | 默认 | 说明 |
-|---|---|---|
-| `AUTOSKILL_PI_REPO_DIR` | （必填） | AutoSkill 仓库根（含 `AutoSkill4Pi/`） |
-| `AUTOSKILL_PI_PYTHON` | `python3` | 运行时解释器 |
-| `AUTOSKILL_PI_USER_ID` | `pi` | 技能归属的 user_id |
-| `AUTOSKILL_PI_STORE_DIR` | `~/.pi/autoskill/SkillBank` | 技能真源目录 |
-| `AUTOSKILL_PI_SKILLS_DIR` | `~/.pi/agent/skills` | 用户级技能镜像目录 |
+Agent 用 Pi 的 file write tool 创建：
 
-## CLI（Python 侧）
-
-```bash
-# 列出所有技能
-python3 -m AutoSkill4Pi.runtime.pi_runtime list-skills --format json
-python3 -m AutoSkill4Pi.runtime.pi_runtime list-skills --format text
-
-# 创建技能（agent tool 内部调用）
-python3 -m AutoSkill4Pi.runtime.pi_runtime create-skill --payload '{"name":"...","description":"...","prompt":"..."}'
-
-# 更新技能
-python3 -m AutoSkill4Pi.runtime.pi_runtime update-skill --payload '{"skill_id":"...","description":"..."}'
-
-# 检索技能
-python3 -m AutoSkill4Pi.runtime.pi_runtime search --query "发布说明"
-
-# 重新镜像
-python3 -m AutoSkill4Pi.runtime.pi_runtime mirror
-
-# 离线批处理（兼容旧流程）
-python3 -m AutoSkill4Pi.runtime.pi_runtime process-dir --dir ~/.pi/agent/sessions
+```
+~/.pi/agent/skills/chinese-code-comments/SKILL.md
 ```
 
-## 与旧架构的区别
+内容：
 
-| | 旧架构 | 新架构 |
-|---|---|---|
-| 抽取决策 | 后台 Python pipeline | Agent 自主决定 |
-| LLM 调用 | Bridge → Pi 模型 | Agent 自己就是 LLM |
-| 触发时机 | `agent_settled`（会话结束后） | `before_agent_start`（会话进行中） |
-| 技能延迟 | 下次会话才生效 | 当场创建，下轮可用 |
-| 上下文 | Python 只看文本 | Agent 有完整推理链 |
-| 复杂度 | TS + bridge + Python | TS + Python（纯存储） |
+```markdown
+---
+name: chinese-code-comments
+description: 写中文代码注释
+version: 0.1.0
+triggers: [写注释, 代码注释, code comments]
+tags: [代码, 中文, 注释]
+---
+# Goal
+所有代码注释使用中文。
+# Constraints & Style
+- 注释必须用中文
+- 简洁明了
+- 解释 why，不解释 what
+```
+
+### 3. 后续会话
+
+Extension 注入时包含新技能 → agent 自动知道并遵循。
+
+### 4. 进化
+
+Agent 发现某技能经常被纠正 → 读 darwin-skill 的 9 维度评估 → 改写 SKILL.md。
+
+## SKILL.md 格式
+
+```markdown
+---
+name: english-kebab-case-name
+description: 1-2 sentences, what this skill does and when to use it
+version: 0.1.0
+triggers: [intent phrase 1, intent phrase 2, intent phrase 3]
+tags: [keyword1, keyword2]
+---
+
+# Goal
+What this skill achieves. Output contract only.
+
+# Constraints & Style
+Must-do and must-not-do rules.
+
+# Workflow (optional)
+Only for explicit multi-step AI operations.
+```
+
+**命名规范**：
+- `name`：永远英文 kebab-case
+- `description` / `prompt` / `triggers` / `tags`：跟随用户语言
+
+## 与 AutoSkill 主项目的关系
+
+**零代码依赖。** Extension 只读文件系统，不 import autoskill，不 spawn Python。
+
+AutoSkill 主项目（Python）作为可选离线工具箱独立存在：
+- 离线批处理大量会话
+- 高级语义检索（BM25 + vector）
+- 复杂进化 pipeline
+
+唯一联系：SKILL.md 格式约定。
 
 ## 目录
 
 ```
 AutoSkill4Pi/
 ├── extension/
-│   ├── autoskill-pi.ts        # Pi extension: context hook + skill tools
+│   ├── autoskill-pi.ts        # ~80 行，读目录 + 注入 prompt
 │   └── package.json
-├── runtime/
-│   ├── pi_session_adapter.py  # Pi JSONL → 轨迹记录（离线批处理用）
-│   ├── pi_skill_mirror.py     # SkillBank → ~/.pi/agent/skills 镜像
-│   └── pi_runtime.py          # SkillBank CRUD + CLI
-├── install.py
+├── runtime/                   # 可选离线工具箱（extension 不调用）
+│   ├── pi_session_adapter.py
+│   ├── pi_skill_mirror.py
+│   └── pi_runtime.py
 └── README.zh-CN.md
 ```
 
-## Darwin-skill 进化
+## 对比旧架构
 
-`autoskill/evolution/SKILL.md` 提供了基于 darwin-skill 的 9 维度技能优化能力。
-Agent 可以在创建技能后手动触发进化，或通过 `/autoskill_evolve` 命令检查需要进化的技能。
-
-进化是可选的增强步骤——创建技能本身已经是高质量抽取（agent 有完整上下文）。
+| | 旧架构 | 极简架构 |
+|---|---|---|
+| Extension 代码量 | ~300 行 | ~80 行 |
+| 依赖 | Python + bridge + SkillBank | 文件系统 |
+| Tool 数量 | 4 个 | 0 个 |
+| Python 子进程 | 每次 tool 调用 | 无 |
+| 技能存储 | SkillBank + mirror | 直接写 ~/.pi/agent/skills/ |
+| 去重/版本 | Python maintainer | Agent 自己判断 |
+| 搜索 | Python BM25 + vector | Agent grep / Pi 原生加载 |
