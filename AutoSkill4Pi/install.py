@@ -45,8 +45,9 @@ def main(argv=None) -> int:
     ext_src = os.path.join(HERE, "extension")
     ext_dst = os.path.join(_expand(args.pi_ext_dir), "autoskill")
     os.makedirs(ext_dst, exist_ok=True)
-    for fn in ("autoskill-pi.ts", "package.json"):
-        shutil.copy2(os.path.join(ext_src, fn), os.path.join(ext_dst, fn))
+    # Pi extension discovery requires subdirectory entry point to be named index.ts
+    shutil.copy2(os.path.join(ext_src, "autoskill-pi.ts"), os.path.join(ext_dst, "index.ts"))
+    shutil.copy2(os.path.join(ext_src, "package.json"), os.path.join(ext_dst, "package.json"))
 
     os.makedirs(_expand(args.pi_home), exist_ok=True)
     os.makedirs(os.path.join(_expand(args.pi_home), "SkillBank"), exist_ok=True)

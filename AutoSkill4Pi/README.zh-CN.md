@@ -52,9 +52,9 @@ Extension 只做一件事：每次 agent 回复前，告诉它"你有哪些技�
 ## 安装
 
 ```bash
-# 1. 复制 extension 到 Pi
+# 1. 复制 extension 到 Pi（子目录入口必须命名为 index.ts）
 mkdir -p ~/.pi/agent/extensions/autoskill
-cp AutoSkill4Pi/extension/autoskill-pi.ts ~/.pi/agent/extensions/autoskill/
+cp AutoSkill4Pi/extension/autoskill-pi.ts ~/.pi/agent/extensions/autoskill/index.ts
 cp AutoSkill4Pi/extension/package.json ~/.pi/agent/extensions/autoskill/
 
 # 2. 创建技能和洞察目录

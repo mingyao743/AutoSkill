@@ -4,9 +4,9 @@
  * Architecture: Pure filesystem, zero Python, zero tools, zero bridge.
  *
  * - before_agent_start:
- *   1. Reads meta-skills from <REPO_DIR>/AutoSkill4Pi/skills/*/SKILL.md (full content)
+ *   1. Reads meta-skills from REPO_DIR/AutoSkill4Pi/skills/{name}/SKILL.md (full content)
  *      → these are "how to create/evolve/capture" guidance
- *   2. Reads user skills from ~/.pi/agent/skills/*/SKILL.md (frontmatter summary)
+ *   2. Reads user skills from ~/.pi/agent/skills/{name}/SKILL.md (frontmatter summary)
  *      → these are the agent's learned skills
  *   3. Reads recent insights from ~/.pi/agent/insights/*.md (title list)
  *      → these are raw observations not yet consolidated into skills
